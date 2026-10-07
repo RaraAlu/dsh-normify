@@ -1,22 +1,48 @@
 # 贡献指南
 
-欢迎提交 Issue 与 Pull Request。贡献前请阅读 [docs/SPEC.zh-CN.md](docs/SPEC.zh-CN.md)（正式规范 v1.0）。
+本仓库以Codex为主要宿主。
+保留31个工具与原有数据格式。
+引擎源码位于 `src/engine/`。
+MCP入口位于 `src/stdio.mjs`。
+技能位于 `skills/`。
+安装脚本位于 `scripts/`。
 
-## 开发环境
+## 本地验证
 
-- Node.js ≥ 18
-- 源码构建：`npm install && npm run build`（tsc 编译 src/ → lib/）
-- 本地快速路径：`scripts/build.sh` 自动选择 vendor-ts 或 npm 路径
+使用Node.js 22及以上。
+原生安装测试需要Codex CLI。
 
-## 修改与验证
+```powershell
+npm ci --ignore-scripts
+npm run build
+npm run typecheck
+npm run check
+npm test
+npm pack --dry-run
+```
 
-1. 改 `src/engine/`（框架无关核心）或 `src/tools.ts` / `src/index.ts`（DSH 适配层）。
-2. `npm run typecheck` 通过后再 `npm run build`。
-3. 引擎回归：node 直调 lib 引擎跑「建树 → 校验 → 编译 → 渲染 → 负例」闭环。
-4. 渲染回归：渲染 HTML 后，提取查看器 JS 做 `node --check`；可用无头浏览器 dump-dom 后做几何断言（线不穿框、文字不出框、标签不压框）。
-5. 工具回归：在 DSH 会话内注入插件（dev_inject_plugin），派子代理用 `normify.*` 工具做端到端验收。
+测试必须使用临时目录。
+不要写入真实用户配置。
+清理前核对绝对目标路径。
+缺少CLI时保留跳过记录。
+不要伪造人工或自动验收。
 
-## 提交规范
+## 修改约定
 
-- 每个提交聚焦一件事；破坏性变更必须同步更新 docs/SPEC.zh-CN.md 与 CHANGELOG.md。
-- `kind` 枚举扩展是向后兼容变更（只改校验器与渲染器各一处常量表）。
+MCP仅向stdout写协议消息。
+日志使用stderr。
+安装器先备份，再执行替换。
+拒绝覆盖用户修改的技能。
+安装失败时保留回滚证据。
+不要向仓库提交用户配置。
+同步提交相关编译产物。
+安装行为变化需更新主说明。
+历史规范仅记录原版设计。
+
+## 提交约定
+
+标题与正文使用中文。
+正文采用Markdown结构。
+仅暂存本目标相关文件。
+记录真实命令与验证结果。
+不要添加署名或工具声明。

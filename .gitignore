@@ -3,6 +3,8 @@ node_modules/
 vendor-ts/
 *.tsbuildinfo
 *.tgz
+reports/
+coverage/
 
 # 编辑器 / 系统
 .vscode/

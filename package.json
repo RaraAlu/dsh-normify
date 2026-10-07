@@ -1,23 +1,29 @@
 {
-  "name": "@dsh-external/dsh-normify",
-  "version": "0.5.4",
-  "description": "Normify（归一化框架图构建器）：人机共读的分形项目结构图系统——模块树源数据零容忍校验/编译/渲染，以及 AI 结构数据生成器（30 个工具 + normify-gen 技能 + 渲染数据集 + 伴随开发）。0.5.4：patch 空补丁拦截、refresh 无 git 降级、acceptance 报错具体化、help 支持 tool:<name> 参数树。适配 DeepSeek Harness 0.1.5+ / DSHEAC AIO 桌面端。",
+  "name": "normify-codex",
+  "version": "0.6.0",
+  "description": "Codex 原生架构治理：31 个本地 MCP 工具、架构生成与伴随开发技能、一键安装。",
   "type": "module",
-  "main": "./lib/index.js",
-  "types": "./lib/types/index.d.ts",
+  "main": "./lib/tools.js",
+  "types": "./lib/types/tools.d.ts",
+  "bin": {
+    "normify-mcp": "./src/stdio.mjs",
+    "normify-install": "./scripts/install-codex.mjs"
+  },
   "files": [
     "lib",
+    "src/*.mjs",
+    "scripts/*.mjs",
     "skills",
     "vendor",
-    "cordis.patch.yml",
     "README.md",
+    "README_EN.md",
     "LICENSE"
   ],
   "license": "MIT",
   "author": "yan-mc",
   "keywords": [
-    "dsh-plugin",
-    "deepseek-harness",
+    "codex",
+    "mcp",
     "agent-skill",
     "architecture",
     "structure-diagram",
@@ -26,48 +32,36 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yan-mc/dsh-normify.git"
+    "url": "git+https://github.com/RaraAlu/dsh-normify.git"
   },
   "bugs": {
-    "url": "https://github.com/yan-mc/dsh-normify/issues"
+    "url": "https://github.com/RaraAlu/dsh-normify/issues"
   },
-  "homepage": "https://github.com/yan-mc/dsh-normify#readme",
+  "homepage": "https://github.com/RaraAlu/dsh-normify#readme",
   "engines": {
-    "node": ">=18",
-    "dsh": ">=0.1.5-rc.2 <0.2.0"
-  },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.0-rc <5",
-    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2 <0.2.0",
-    "@deepseek-ai/dsh-skill": ">=0.1.5-rc.2 <0.2.0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-tools": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-skill": {
-      "optional": true
-    }
+    "node": ">=22"
   },
   "dependencies": {
-    "yaml": "^2.8.1"
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ajv": "8.20.0",
+    "proper-lockfile": "4.1.2",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
-    "@types/node": "^24.13.3",
-    "typescript": "^5.9.0",
-    "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/schemastery": "^3.18.2",
-    "@deepseek-ai/cosmokit": "^1.8.3",
-    "@standard-schema/spec": "^1.1.0"
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3"
   },
   "scripts": {
-    "build": "bash scripts/build.sh",
-    "typecheck": "node node_modules/typescript/bin/tsc -p tsconfig.json --noEmit",
-    "test": "node tests/engine-e2e.mjs && node tests/companion-e2e.mjs && node tests/regression-0.5.2.mjs && node tests/regression-0.5.3.mjs && node tests/regression-0.5.4.mjs"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node src/stdio.mjs",
+    "check": "node scripts/check.mjs && node ci-contract-check.cjs",
+    "test": "npm run test:codex && npm run test:engine",
+    "test:codex": "node --test tests/*.test.mjs",
+    "test:engine": "node tests/engine-e2e.mjs && node tests/companion-e2e.mjs && node tests/regression-0.5.2.mjs && node tests/regression-0.5.3.mjs && node tests/regression-0.5.4.mjs",
+    "setup": "node scripts/setup.mjs",
+    "install:codex": "node scripts/install-codex.mjs",
+    "verify:codex": "node scripts/verify-codex.mjs",
+    "install:hooks": "node scripts/install-hooks.mjs"
   }
 }

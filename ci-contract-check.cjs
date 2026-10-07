@@ -1,1 +1,23 @@
-const fs=require('fs');const p=require('./package.json');if(!p.dsh||!p.dsh.bundle||typeof p.dsh.bundle.patch!=='string')throw new Error('package.json must declare dsh.bundle.patch');if(!fs.existsSync(p.dsh.bundle.patch))throw new Error('dsh.bundle.patch file missing');const src=fs.readFileSync('lib/tools.js','utf8');const names=[...src.matchAll(/register\('([^']+)'/g)].map(m=>m[1]);if(names.length!==31)throw new Error('expected 31 normify tools, got '+names.length);for(const need of ['normify_project_init','normify_help','normify_module_batch'])if(!names.includes(need))throw new Error('missing tool: '+need);for(const n of names)if(!/^[a-zA-Z0-9_-]+$/.test(n))throw new Error('tool name not provider-safe: '+n);console.log('bundle + tool-name contract ok')
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const p = require('./package.json');
+assert.equal(p.name, 'normify-codex');
+assert.ok(p.bin['normify-mcp']);
+assert.ok(p.bin['normify-install']);
+assert.equal(p.peerDependencies, undefined, 'Codex must not depend on a DSH host');
+for (const entry of Object.values(p.bin)) assert.ok(fs.existsSync(entry), 'Missing entry: ' + entry);
+const source = fs.readFileSync('lib/tools.js', 'utf8');
+const names = [...source.matchAll(/register\('([^']+)'/g)].map(match => match[1]);
+assert.equal(names.length, 31);
+assert.equal(new Set(names).size, 31);
+for (const name of names) assert.match(name, /^[a-zA-Z0-9_-]+$/);
+for (const name of ['normify_project_init', 'normify_help', 'normify_module_batch']) {
+  assert.ok(names.includes(name), 'Missing tool: ' + name);
+}
+for (const name of ['normify-gen', 'normify-dev']) {
+  const skill = fs.readFileSync(`skills/${name}/SKILL.md`, 'utf8');
+  assert.ok(skill.startsWith('---'));
+  assert.ok(skill.includes('name: ' + name));
+  assert.ok(fs.existsSync(`skills/${name}/agents/openai.yaml`));
+}
+console.log('Codex package and 31-tool contract passed.');

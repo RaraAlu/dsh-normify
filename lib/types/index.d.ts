@@ -1,4 +1,11 @@
-import type { Context } from '@deepseek-ai/cordis';
+import type { ToolContext } from './tools.js';
+interface Context extends ToolContext {
+    logger?: {
+        info?: (message: string) => void;
+        warn?: (message: string) => void;
+    };
+    effect: (register: () => () => void, label?: string) => void;
+}
 export declare const name = "@dsh-external/dsh-normify";
 export declare const inject: string[];
 export interface Config {
@@ -10,3 +17,4 @@ export interface Config {
 }
 export declare const Config: any;
 export declare function apply(ctx: Context, config: Config): void;
+export {};

@@ -2,7 +2,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { registerTools } from './tools.js';
-import type { Context } from '@deepseek-ai/cordis';
+import type { ToolContext } from './tools.js';
+
+// 仅供旧宿主兼容与回归测试。
+interface Context extends ToolContext {
+    logger?: { info?: (message: string) => void; warn?: (message: string) => void };
+    effect: (register: () => () => void, label?: string) => void;
+}
 // vendored schemastery：相对路径加载（不依赖注入器环境的包名解析）
 // @ts-expect-error vendored mjs 无声明文件
 const zModule = await import('../vendor/schemastery/lib/index.mjs');

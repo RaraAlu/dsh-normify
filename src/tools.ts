@@ -17,7 +17,6 @@ import { renderProject } from './engine/render.js';
 import { fmtDiag } from './engine/diag.js';
 import { HELP_TOPICS, toolReference, topicReference } from './engine/reference.js';
 
-import type { Context } from '@deepseek-ai/cordis';
 import type { HelpTopic, ToolCatalogEntry } from './engine/reference.js';
 import type { ChangeModules, ChangeStatus, Diagnostic, LayoutData, LayoutEdgeHint, LayoutGroup, LocalizedText, Module, ModuleFile, ModuleState, PolicyData, PolicyRule, SourceRef } from './engine/types.js';
 
@@ -53,9 +52,14 @@ interface ToolDef {
     parameters?: ObjectSchema;
 }
 
-/** dsh-tools 服务的注册面（可选外部服务）。 */
+/** 宿主无关的工具注册接口。 */
 interface ToolService {
     register?: (def: ToolRegistration) => void;
+}
+
+/** 工具注册接口不依赖宿主。 */
+export interface ToolContext {
+    tools?: ToolService;
 }
 
 /** 交给 tools.register 的注册对象。 */
@@ -353,7 +357,7 @@ function boolOpt(description: string): SchemaNode { return { type: 'boolean', de
 /**
  * 把作者态 schema（属性内联 `required: true`，方便手写）编译为标准 JSON Schema：
  * 属性级 required 提升为对象级 `required: string[]`，对象补 `additionalProperties: false`。
- * dsh 0.1.5+ 会把工具 parameters 原样交给模型/provider，必须是规范 JSON Schema
+ * MCP与宿主都需要标准Schema。
  *（`required: true` 不是合法关键字）。
  */
 function toJsonSchema(node: unknown): SchemaValue {
@@ -574,7 +578,7 @@ function diagnosticsOut(errors: Diagnostic[], warnings: Diagnostic[]): { ok: boo
         summary: errors.length + ' error / ' + warnings.length + ' warning',
     };
 }
-export function registerTools(ctx: Context, env: ToolEnv): void {
+export function registerTools(ctx: ToolContext, env: ToolEnv): void {
     const toolCatalog: ToolCatalogEntry[] = [];
     const register = <A>(key: string, def: ToolDef, execute: (args: A) => Promise<unknown>): void => {
         toolCatalog.push({ name: key, description: def.description, behavior: def.behavior, parameters: def.parameters });
@@ -608,7 +612,7 @@ export function registerTools(ctx: Context, env: ToolEnv): void {
             ...def,
             name: key,
             behavior,
-            // 旧版行为标记保留（文档/兼容），新版 dsh 0.1.5+ 不再读取这三个字段。
+            // MCP适配层读取这些行为标记。
             readOnly: behavior === 'read',
             idempotent: behavior === 'read' || behavior === 'idempotent' || behavior === 'destroy',
             destructive: behavior === 'destroy',
@@ -619,7 +623,7 @@ export function registerTools(ctx: Context, env: ToolEnv): void {
                 ],
             },
             execute: wrapped,
-            // 只读工具可被 dsh 0.1.5+ 的并发调度器并行调用；写工具保持独占。
+            // 保留旧宿主的只读并发提示。
             ...(behavior === 'read' ? { isConcurrencySafe: () => true } : {}),
         });
     };
@@ -774,7 +778,7 @@ export function registerTools(ctx: Context, env: ToolEnv): void {
         }, ['frontmatter']),
     }, async (args: ModuleUpsertArgs) => {
         const proj = await resolve(args, true);
-        // dsh 0.1.5+ 会 deepFreeze 工具实参，禁止原地修改：先浅拷贝再规范化 parent。
+        // 保持入参不变，只修改副本。
         const fm = { ...args.frontmatter };
         // parent 允许传字符串 "null" 或 JSON null（根模块）。
         if (fm.parent === 'null' || fm.parent === null)

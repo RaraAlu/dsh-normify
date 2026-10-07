@@ -1,5 +1,11 @@
 # Normify（归一化框架图构建器）正式规范 v1.0
 
+> 本文记录原版DSH设计。
+> 当前版本主用Codex。
+> 当前接入见[主说明](../README.md)。
+> 下文目录与接入说明属历史。
+> 示例路径不属于本仓库。
+
 > 人机共读的分形项目结构图系统：一套结构数据 + 一个渲染器，以 DSH 插件形式交付。
 > 状态：**v1.0 定稿**（取代《ModTree-制作计划草案.md》；该旧草案已从工作区清理）｜ 项目代号沿革：ModTree → **Normify**
 
@@ -464,7 +470,7 @@ deps:
 
 ### 6.1 形态：技能 + 工具
 
-- 技能 `skills/normify-gen/SKILL.md`：分析策略、创作规程、增量再生成策略（§6.3 原文收录）。
+- [原版技能参考](../skills/normify-gen/references/upstream-skill.md)：分析策略、创作规程、增量再生成策略（§6.3 原文收录）。
 - 工具集（§6.4）：AI 经工具写结构数据，**写时即过 L1 校验**，不裸写文件。
 
 ### 6.2 初始全量生成流程（SKILL.md 收录）
@@ -614,7 +620,7 @@ dsh-normify/
 │   ├── compiler/             # 源树解析 → tree.json（含校验核心）
 │   └── renderer/             # tree.json + layouts → 单文件 HTML
 ├── skills/
-│   └── normify-gen/SKILL.md  # 生成器技能（§6.2 + §6.3 全文收录）
+│   └── normify-gen/          # 原版生成器技能目录
 ├── assets/template.html      # 查看器模板
 └── README.md
 ```

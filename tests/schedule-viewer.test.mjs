@@ -396,6 +396,7 @@ function runViewer(html) {
 }
 
 function assertTopDown(svg) {
+  assert.equal(svg.dataset.direction, 'TB');
   const width = Number(svg.dataset.nodeWidth), height = Number(svg.dataset.nodeHeight);
   assert.ok(width > 0 && height > 0, 'Nodes must expose positive dimensions.');
   const nodes = new Map(svg.querySelectorAll('[data-task-id]').map(node => [node.dataset.taskId, node]));
@@ -412,6 +413,20 @@ function assertTopDown(svg) {
     assert.match(edge.getAttribute('marker-end'), /^url\(#arrow-/);
   }
   return edges.length;
+}
+
+function cssDeclarations(html, selector) {
+  const normalize = value => value.replace(/([=])['"]([^'"]+)['"]/g, '$1$2').replace(/\s+/g, ' ').trim();
+  const css = /<style\b[^>]*>([\s\S]*?)<\/style>/i.exec(html)?.[1] ?? '';
+  const declarations = {};
+  for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (!rule[1].split(',').map(normalize).includes(normalize(selector))) continue;
+    for (const property of rule[2].split(';')) {
+      const colon = property.indexOf(':');
+      if (colon >= 0) declarations[property.slice(0, colon).trim()] = property.slice(colon + 1).trim();
+    }
+  }
+  return declarations;
 }
 
 async function interactiveFixture(t) {
@@ -449,9 +464,13 @@ test('graph-first layout keeps a full-height white canvas and responsive detail 
   assert.equal(state.element('view-overview').getAttribute('aria-pressed'), 'true');
   assert.equal(state.element('detail-panel').hidden, true);
   assert.equal(state.element('toggle-details').getAttribute('aria-pressed'), 'false');
-  const phases = state.element('phase-select').options.map(option => option.textContent);
+  const options = state.element('phase-select').options;
+  const phases = options.map(option => option.dataset.phase);
   assert.ok(phases.includes('P0') && phases.includes('P1'));
   assert.ok(phases.includes('P0-历史待续') && phases.includes('custom-stage'));
+  const taskData = tasksOf(JSON.parse(scripts(html).find(script => /id="schedule-data"/.test(script.attributes)).code));
+  for (const option of options) assert.equal(option.textContent,
+    option.dataset.phase + ' · ' + taskData.filter(task => task.phase === option.dataset.phase).length);
   state.element('toggle-details').emit('click');
   assert.equal(state.element('detail-panel').hidden, false);
   assert.equal(state.element('toggle-details').getAttribute('aria-pressed'), 'true');
@@ -459,12 +478,95 @@ test('graph-first layout keeps a full-height white canvas and responsive detail 
   assert.equal(state.element('detail-panel').hidden, true);
 });
 
+test('schedule exposes only overview, full overview, and phase task entries', async t => {
+  const { state } = await interactiveFixture(t);
+  const entries = state.element('schedule-toolbar-row1').querySelectorAll('[data-mode]');
+  assert.deepEqual(entries.map(entry => [entry.id, entry.dataset.mode, entry.textContent]), [
+    ['view-overview', 'overview', '概览'], ['view-full', 'full', '完整总览'], ['view-phase', 'phase', '阶段任务'],
+  ]);
+  assert.equal(state.document.querySelectorAll('[data-mode]').length, 3);
+  assert.ok(entries.every(entry => !/准入主线|完整依赖/.test(entry.textContent)));
+  state.element('lang').emit('click');
+  assert.match(state.element('view-overview').textContent, /^Overview$/i);
+  assert.match(state.element('view-full').textContent, /^Full schedule$/i);
+  assert.match(state.element('view-phase').textContent, /^Phase tasks$/i);
+});
+
+test('overview keeps purple rectangles while detailed views expose distinct recorded status colors', async t => {
+  const { html, state } = await interactiveFixture(t);
+  const overview = cssDeclarations(html, '[data-style=overview] .task-node rect');
+  assert.equal(overview.fill, '#f0eaff');
+  assert.equal(overview.stroke, '#a78bfa');
+  const palette = {
+    blocked: ['#fee2e2', '#dc2626'], ready: ['#dcfce7', '#16a34a'],
+    in_progress: ['#fef3c7', '#d97706'], verified: ['#e0f2fe', '#0284c7'],
+    external: ['#e0e7ff', '#6366f1'],
+  };
+  for (const [status, [fill, stroke]] of Object.entries(palette)) {
+    const selector = '.task-node.' + status + ' rect';
+    const detail = { ...cssDeclarations(html, selector),
+      ...cssDeclarations(html, '[data-style=detail] ' + selector) };
+    assert.equal(detail.fill, fill, status + ' must keep its distinct pastel fill.');
+    assert.equal(detail.stroke, stroke, status + ' must keep its distinct status stroke.');
+  }
+  for (const panel of state.element('graph-canvas').querySelectorAll('[data-graph-view]')) {
+    const svg = panel.querySelector('svg');
+    assert.equal(svg.dataset.style, panel.dataset.graphView === 'overview' ? 'overview' : 'detail');
+    for (const node of svg.querySelectorAll('[data-task-id]')) {
+      assert.equal(Number(node.querySelector('rect').getAttribute('rx') ?? 0), 0);
+      for (const text of node.querySelectorAll('text')) {
+        assert.equal(Number(text.getAttribute('x')), Number(svg.dataset.nodeWidth) / 2);
+        const anchor = text.getAttribute('text-anchor') ?? node.getAttribute('text-anchor')
+          ?? cssDeclarations(html, '.' + text.getAttribute('class'))['text-anchor']
+          ?? cssDeclarations(html, '.task-node')['text-anchor'];
+        assert.equal(anchor, 'middle', 'Every node label must remain centered.');
+      }
+    }
+  }
+  state.element('view-full').emit('click');
+  state.panel().querySelector('[data-task-id="' + id('work') + '"]').emit('click');
+  assert.equal(state.panel().dataset.graphView, 'full');
+  assert.equal(state.element('detail-panel').hidden, false);
+  const detail = state.element('detail-content').querySelectorAll('[data-detail-task]').find(node => !node.hidden);
+  assert.equal(detail.dataset.detailTask, id('work'));
+  assert.match(detail.textContent, /此状态并非产品验收|This state is not product acceptance/);
+});
+
+test('full overview retains every explicit prerequisite and conflict claim in its details', async t => {
+  const { directory, state } = await interactiveFixture(t);
+  const plan = await loadSchedulePlan(directory);
+  state.element('view-full').emit('click');
+  const svg = state.svg();
+  assert.deepEqual(svg.querySelectorAll('[data-task-id]').map(node => node.dataset.taskId).sort(),
+    plan.tasks.map(task => task.id).sort());
+  const expectedEdges = plan.tasks.flatMap(task => task.depends_on.map(from => from + ' → ' + task.id)).sort();
+  assert.deepEqual(svg.querySelectorAll('.prerequisite').map(edge => edge.dataset.from + ' → ' + edge.dataset.to).sort(), expectedEdges);
+  const pair = (left, right) => [left, right].sort().join(' ↔ ');
+  assert.deepEqual(svg.querySelectorAll('.conflict-edge').map(edge => pair(edge.dataset.left, edge.dataset.right)).sort(),
+    plan.conflicts.map(conflict => pair(conflict.left, conflict.right)).sort());
+  assertTopDown(svg);
+  svg.querySelector('[data-task-id="' + id('work') + '"]').emit('click');
+  const conflict = plan.conflicts.find(item => item.left === id('work') || item.right === id('work'));
+  assert.ok(conflict);
+  assert.ok(svg.querySelectorAll('.selected-conflict').some(edge =>
+    pair(edge.dataset.left, edge.dataset.right) === pair(conflict.left, conflict.right)));
+  const record = state.element('detail-panel').querySelectorAll('[data-conflict-left]').find(item =>
+    pair(item.dataset.conflictLeft, item.dataset.conflictRight) === pair(conflict.left, conflict.right) && !item.hidden);
+  assert.ok(record);
+  record.querySelector('[data-conflict-index]').emit('click');
+  const output = state.element('conflict-detail');
+  assert.equal(output.hidden, false);
+  assert.deepEqual(JSON.parse(output.textContent), { left: conflict.left, right: conflict.right,
+    modules: conflict.modules, files: conflict.files, resources: conflict.resources });
+});
+
 test('phase dropdown preserves arbitrary labels beside standard phases and real prerequisites', async t => {
   const { state } = await interactiveFixture(t);
   const select = state.element('phase-select');
   for (const [label, taskId] of [['custom-stage', id('custom')], ['P0-历史待续', id('occupied')]]) {
-    const option = select.options.find(item => item.textContent === label);
+    const option = select.options.find(item => item.dataset.phase === label);
     assert.ok(option, 'Missing phase: ' + label);
+    assert.equal(option.textContent, label + ' · 1');
     select.value = option.value; select.emit('change');
     assert.equal(state.panel().dataset.graphView, 'phase-' + option.value);
     assert.ok(state.svg().querySelector('[data-task-id="' + taskId + '"]'));
@@ -519,7 +621,7 @@ test('gate activation opens its phase and details while dropdown navigation loca
   const gate = state.panel().querySelector('[data-task-id="' + id('p1') + '"]');
   assert.ok(gate);
   gate.emit('click');
-  assert.equal(state.element('phase-select').selectedOptions[0].textContent, 'P1');
+  assert.equal(state.element('phase-select').selectedOptions[0].dataset.phase, 'P1');
   assert.match(state.panel().dataset.graphView, /^phase-/);
   assert.equal(state.element('detail-panel').hidden, false);
   const details = state.element('detail-content');
@@ -614,6 +716,49 @@ test('admission overview retains seventeen real gate nodes without adding phase-
   assert.equal(p11.getAttribute('tabindex'), '0');
 });
 
+test('overview includes four recorded precision gates and projects their real converging dependencies', async t => {
+  const { directory, save } = await fixture(t);
+  const entries = [
+    ['base', 'P8 Base gate', 'P8', []],
+    ['bridge', 'Implementation bridge', 'P9', ['base']],
+    ['p10', 'P10 Delivery gate', 'P10', ['bridge']],
+    ['np01', 'NP01 Precision map', 'P11', ['p10']],
+    ['np02', 'NP02 Reference gate', 'P11', ['base']],
+    ['np03', 'NP03 Converging gate', 'P11', ['np01', 'np02']],
+    ['np04', 'NP04', 'P11', ['np03']],
+    ['finish', 'P11 Finish gate', 'P11', ['np04', 'p10']],
+    ['decoy', 'NP05 Non-gate task', 'P11', []],
+  ];
+  for (const [name, title, phase, predecessors] of entries) await save(change(name, {
+    title: localized(title), schedule: { phase, depends_on: predecessors.map(id) },
+  }));
+  const { url } = await openScheduleViewer(directory);
+  const html = (await http(url)).body, state = runViewer(html);
+  const precision = cssDeclarations(html, '[data-style=overview] .task-node.precision-gate rect');
+  assert.equal(precision.fill, '#dbeafe');
+  assert.equal(precision.stroke, '#3b82f6');
+  for (const panel of state.element('graph-canvas').querySelectorAll('[data-graph-view]')) {
+    const precisionNodes = panel.querySelectorAll('.precision-gate');
+    assert.equal(precisionNodes.length, panel.dataset.graphView === 'overview' ? 4 : 0);
+  }
+  const svg = state.svg();
+  assert.deepEqual(svg.querySelectorAll('[data-task-id]').map(node => node.dataset.taskId).sort(),
+    ['base', 'p10', 'np01', 'np02', 'np03', 'np04', 'finish'].map(id).sort());
+  const expected = [['base', 'p10'], ['p10', 'np01'], ['base', 'np02'], ['np01', 'np03'],
+    ['np02', 'np03'], ['np03', 'np04'], ['np04', 'finish']];
+  assert.deepEqual(svg.querySelectorAll('.prerequisite').map(edge => edge.dataset.from + ' → ' + edge.dataset.to).sort(),
+    expected.map(([from, to]) => id(from) + ' → ' + id(to)).sort());
+  assert.equal(assertTopDown(svg), expected.length);
+  assert.equal(svg.querySelector('[data-task-id="' + id('np03') + '"]').classList.contains('precision-gate'), true);
+  svg.querySelector('[data-task-id="' + id('np03') + '"]').emit('click');
+  assert.equal(state.element('phase-select').selectedOptions[0].dataset.phase, 'P11');
+  assert.equal(state.svg().dataset.style, 'detail');
+  assert.equal(state.element('detail-panel').hidden, false);
+  const detail = state.element('detail-content').querySelectorAll('[data-detail-task]').find(node => !node.hidden);
+  assert.equal(detail.dataset.detailTask, id('np03'));
+  for (const prerequisite of ['np01', 'np02']) assert.ok(detail.querySelector('[data-jump="' + id(prerequisite) + '"]'));
+});
+
 test('overview, phases, and full dependencies use top-down ranks with horizontal conflict branches', async t => {
   const { directory, save } = await fixture(t);
   await save(change('early', { title: localized('P8 Early gate'), schedule: { phase: 'P8' } }));
@@ -646,7 +791,7 @@ test('overview, phases, and full dependencies use top-down ranks with horizontal
   assert.ok(!full.querySelectorAll('.prerequisite').some(edge =>
     [id('left'), id('right')].includes(edge.dataset.from) && [id('left'), id('right')].includes(edge.dataset.to)));
   const select = state.element('phase-select');
-  select.value = select.options.find(option => option.textContent === 'P2').value; select.emit('change');
+  select.value = select.options.find(option => option.dataset.phase === 'P2').value; select.emit('change');
   assert.equal(assertTopDown(state.svg()), 3);
   assert.ok(state.svg().querySelector('[data-task-id="' + id('early') + '"]').classList.contains('external'));
 });
@@ -663,7 +808,7 @@ test('top-down history toggles keep real prerequisites distinct from conflict-on
   assert.equal(plan.ok, true, JSON.stringify(plan.errors));
   const state = runViewer(renderScheduleTemplate(plan, { name: 'History regression' }));
   const select = state.element('phase-select');
-  select.value = select.options.find(option => option.textContent === 'P1').value; select.emit('change');
+  select.value = select.options.find(option => option.dataset.phase === 'P1').value; select.emit('change');
   const svg = state.svg(), legacy = svg.querySelector('[data-task-id="' + id('legacy') + '"]');
   const prerequisite = svg.querySelector('[data-task-id="' + id('prerequisite') + '"]');
   assert.ok(legacy.classList.contains('history-node'), 'Conflict-only occupancy must remain available for display.');

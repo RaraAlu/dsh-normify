@@ -79,22 +79,29 @@ The build freezes `schedule.json`, `schedule.md`, and `schedule.mmd` in its rece
 The schedule renderer returns a loopback-only interactive URL, never an HTML file.
 It reads live inputs on refresh and does not require a build. The architecture renderer keeps its file output.
 Only explicit diagram requests should open the URL. URLs expire with the MCP process; render again after restart.
-The graph-first viewer uses a full-window white canvas, two toolbars, and three modes:
-admission overview, phase tasks, and complete dependencies. Dropdowns select a phase or locate a task.
+The graph-first viewer keeps all three views at one local URL, with a full-window white canvas and two toolbars:
+overview, complete overview, and phase tasks. The overview uses purple square-corner rectangles;
+it includes registered NP01–NP04 final-review gates.
+The complete overview and phase view use solid status-colored nodes beside a white canvas.
+Toolbars and details default to dark styling; users can also select the light theme.
+The viewer exposes no second rendering entry point. Dropdowns select a phase or locate a task.
 All three views default to top-to-bottom dependency flow. Dependency ranks determine vertical positions;
 siblings share a horizontal row. The overview never wraps back into an invented phase sequence.
 Details stay hidden initially. Selecting a node opens a 310px right-hand panel;
 on narrow screens it uses the bottom 35%. Closing it returns that space to the canvas.
+Selecting an overview gate opens its phase and details.
 A details button also exposes diagnostics without selecting a node.
 Details retain original prerequisites, current readiness, write claims, and historical running occupancy.
 The complete graph shows explicit prerequisites. Overview arrows project real dependency paths,
 not an invented phase sequence; phase graphs retain direct external prerequisites.
+Restoring the visual style does not copy old workflow relationships: every view reads the current dependency data.
 Orange dashed lines show registered conflicts. The historical occupancy toggle changes the diagram only;
 it never removes blockers, gates, or real prerequisites. Branching does not grant parallel permission.
 Predicted sequential waves remain separate from graph levels. A task's `verified` state is not product acceptance.
 Waves are not calendar estimates or automatic execution.
 Unscheduled legacy changes do not receive automatic permission to run in parallel.
 The default architecture view and unscheduled data remain compatible.
+The same process and canonical project path reuse the URL; a new process can create a different address.
 
 See the [scheduling guide](docs/scheduling.md) for fields and complete tool examples.
 

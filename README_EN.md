@@ -81,6 +81,8 @@ It reads live inputs on refresh and does not require a build. The architecture r
 Only explicit diagram requests should open the URL. URLs expire with the MCP process; render again after restart.
 The graph-first viewer uses a full-window white canvas, two toolbars, and three modes:
 admission overview, phase tasks, and complete dependencies. Dropdowns select a phase or locate a task.
+All three views default to top-to-bottom dependency flow. Dependency ranks determine vertical positions;
+siblings share a horizontal row. The overview never wraps back into an invented phase sequence.
 Details stay hidden initially. Selecting a node opens a 310px right-hand panel;
 on narrow screens it uses the bottom 35%. Closing it returns that space to the canvas.
 A details button also exposes diagnostics without selecting a node.

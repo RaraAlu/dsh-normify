@@ -9,8 +9,9 @@ import { realpath } from 'node:fs/promises';
 import lockfile from 'proper-lockfile';
 import test from 'node:test';
 import { renderProject } from '../lib/engine/render.js';
-import { loadSchedulePlan } from '../lib/engine/schedule.js';
+import { buildSchedule, loadSchedulePlan } from '../lib/engine/schedule.js';
 import { closeScheduleViewer, openScheduleViewer } from '../lib/engine/schedule-server.js';
+import { renderScheduleTemplate } from '../lib/engine/schedule-template.js';
 
 const at = '2026-10-12T00:00:00.000Z';
 const id = name => '2026-10-12-' + name;
@@ -394,6 +395,25 @@ function runViewer(html) {
   return { document, element, panel, svg, refreshed: () => refreshed };
 }
 
+function assertTopDown(svg) {
+  const width = Number(svg.dataset.nodeWidth), height = Number(svg.dataset.nodeHeight);
+  assert.ok(width > 0 && height > 0, 'Nodes must expose positive dimensions.');
+  const nodes = new Map(svg.querySelectorAll('[data-task-id]').map(node => [node.dataset.taskId, node]));
+  const edges = svg.querySelectorAll('.prerequisite');
+  for (const edge of edges) {
+    const from = nodes.get(edge.dataset.from), to = nodes.get(edge.dataset.to);
+    assert.ok(from && to, 'Both prerequisite endpoints must exist.');
+    const x1 = Number(from.dataset.x) + width / 2, y1 = Number(from.dataset.y) + height;
+    const x2 = Number(to.dataset.x) + width / 2, y2 = Number(to.dataset.y);
+    assert.ok(y2 > y1, edge.dataset.from + ' must precede ' + edge.dataset.to + ' vertically.');
+    const coordinates = edge.getAttribute('d').match(/-?\d+(?:\.\d+)?/g).map(Number);
+    assert.deepEqual(coordinates.slice(0, 2), [x1, y1], 'Arrows must leave the predecessor bottom center.');
+    assert.deepEqual(coordinates.slice(-2), [x2, y2], 'Arrows must enter the successor top center.');
+    assert.match(edge.getAttribute('marker-end'), /^url\(#arrow-/);
+  }
+  return edges.length;
+}
+
 async function interactiveFixture(t) {
   const f = await fixture(t);
   await f.save(change('history', { title: localized('Historic contract'), status: 'verified', closed_at: at, schedule: undefined }));
@@ -585,12 +605,82 @@ test('admission overview retains seventeen real gate nodes without adding phase-
   assert.equal(nodes.length, 17);
   const edges = state.svg().querySelectorAll('.prerequisite');
   assert.equal(edges.length, 16);
+  assert.equal(assertTopDown(state.svg()), 16);
   const edgeTitles = edges.map(edge => edge.querySelector('title')?.textContent ?? '');
   for (let index = 1; index < anchors.length; index++)
     assert.ok(edgeTitles.includes(id('gate-' + (index - 1)) + ' → ' + id('gate-' + index)));
   const p11 = nodes.find(node => node.dataset.taskId === id('gate-16'));
   assert.equal(p11.getAttribute('role'), 'button');
   assert.equal(p11.getAttribute('tabindex'), '0');
+});
+
+test('overview, phases, and full dependencies use top-down ranks with horizontal conflict branches', async t => {
+  const { directory, save } = await fixture(t);
+  await save(change('early', { title: localized('P8 Early gate'), schedule: { phase: 'P8' } }));
+  await save(change('middle', { title: localized('P2 Middle gate'),
+    schedule: { phase: 'P2', depends_on: [id('early')] } }));
+  for (const name of ['left', 'right']) await save(change(name, { title: localized(name + ' work'),
+    schedule: { phase: 'P2', depends_on: [id('middle')], resources: ['exclusive:gpu'] } }));
+  await save(change('last', { title: localized('P11 Last gate'),
+    schedule: { phase: 'P11', depends_on: [id('left'), id('right')] } }));
+  const plan = await loadSchedulePlan(directory);
+  assert.equal(plan.ok, true, JSON.stringify(plan.errors));
+  assert.ok(plan.waves.every(wave => !wave.includes(id('left')) || !wave.includes(id('right'))),
+    'A shared visual rank must not grant parallel execution of conflicting tasks.');
+  const { url } = await openScheduleViewer(directory);
+  const state = runViewer((await http(url)).body);
+  const panels = state.element('graph-canvas').querySelectorAll('[data-graph-view]');
+  for (const panel of panels) assertTopDown(panel.querySelector('svg'));
+  assert.equal(assertTopDown(state.svg()), 2);
+  const gatePositions = state.svg().querySelectorAll('[data-task-id]');
+  const early = gatePositions.find(node => node.dataset.taskId === id('early'));
+  const middle = gatePositions.find(node => node.dataset.taskId === id('middle'));
+  assert.ok(Number(early.dataset.y) < Number(middle.dataset.y), 'Explicit dependencies override phase numbering.');
+  state.element('view-full').emit('click');
+  assert.equal(assertTopDown(state.svg()), 5);
+  const full = state.svg(), left = full.querySelector('[data-task-id="' + id('left') + '"]');
+  const right = full.querySelector('[data-task-id="' + id('right') + '"]');
+  assert.equal(left.dataset.y, right.dataset.y);
+  assert.notEqual(left.dataset.x, right.dataset.x);
+  assert.ok(full.querySelector('.conflict-edge'));
+  assert.ok(!full.querySelectorAll('.prerequisite').some(edge =>
+    [id('left'), id('right')].includes(edge.dataset.from) && [id('left'), id('right')].includes(edge.dataset.to)));
+  const select = state.element('phase-select');
+  select.value = select.options.find(option => option.textContent === 'P2').value; select.emit('change');
+  assert.equal(assertTopDown(state.svg()), 3);
+  assert.ok(state.svg().querySelector('[data-task-id="' + id('early') + '"]').classList.contains('external'));
+});
+
+test('top-down history toggles keep real prerequisites distinct from conflict-only occupancy', () => {
+  const plan = buildSchedule([
+    change('root', { title: localized('P0 Root gate'), status: 'verified', closed_at: at }),
+    change('prerequisite', { title: localized('Historic prerequisite'), status: 'in_progress', schedule: undefined }),
+    change('legacy', { title: localized('Historical conflicting worker'), status: 'in_progress', schedule: undefined,
+      modules: { modify: ['demo.worker'] } }),
+    change('gate', { title: localized('P1 Worker gate'), modules: { modify: ['demo.worker'] },
+      schedule: { phase: 'P1', depends_on: [id('root'), id('prerequisite')] } }),
+  ]);
+  assert.equal(plan.ok, true, JSON.stringify(plan.errors));
+  const state = runViewer(renderScheduleTemplate(plan, { name: 'History regression' }));
+  const select = state.element('phase-select');
+  select.value = select.options.find(option => option.textContent === 'P1').value; select.emit('change');
+  const svg = state.svg(), legacy = svg.querySelector('[data-task-id="' + id('legacy') + '"]');
+  const prerequisite = svg.querySelector('[data-task-id="' + id('prerequisite') + '"]');
+  assert.ok(legacy.classList.contains('history-node'), 'Conflict-only occupancy must remain available for display.');
+  assert.ok(!prerequisite.classList.contains('history-node'), 'Real prerequisites must never depend on the history toggle.');
+  const history = state.element('history-toggle');
+  for (const checked of [false, true, false]) {
+    history.checked = checked; history.emit('change');
+    assert.equal(assertTopDown(state.svg()), 2);
+    assert.equal(state.element('graph-canvas').classList.contains('show-history'), checked);
+    assert.ok(state.svg().querySelectorAll('.prerequisite').some(edge =>
+      edge.dataset.from === id('prerequisite') && edge.dataset.to === id('gate')));
+    assert.ok(state.svg().querySelectorAll('.conflict-edge').some(edge =>
+      [edge.dataset.left, edge.dataset.right].includes(id('legacy'))));
+  }
+  state.element('view-full').emit('click');
+  assert.equal(assertTopDown(state.svg()), 2);
+  assert.ok(!state.svg().querySelector('[data-task-id="' + id('legacy') + '"]').classList.contains('history-node'));
 });
 
 test('stage graph retains external prerequisites without inventing phase dependencies', async t => {

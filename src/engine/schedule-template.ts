@@ -22,16 +22,17 @@ function words(zh: string, en: string, lang: Language): string {
 }
 
 function list(values: unknown): string {
-    const valuesList = lines(values);
-    return valuesList.length > 0 ? valuesList.map(escape).join('<br>') : '<span class="muted">—</span>';
+    const entries = lines(values);
+    return entries.length ? '<ul>' + entries.map(value => '<li>' + escape(value) + '</li>').join('') + '</ul>'
+        : '<p class="muted">—</p>';
 }
 
-function titleLines(title: string): string[] {
+function titleLines(title: string, limit: number): string[] {
     const rows = [''];
     let width = 0;
     for (const char of title) {
         const charWidth = (char.codePointAt(0) ?? 0) > 0x2e80 ? 14 : 8;
-        if (width + charWidth > 248) {
+        if (width + charWidth > limit) {
             if (rows.length === 2) {
                 rows[1] = rows[1].slice(0, -1) + '…';
                 break;
@@ -45,7 +46,7 @@ function titleLines(title: string): string[] {
     return rows;
 }
 
-/** 总览只投影真实可达边。阶段名称不产生任何前置。 */
+/** 主线只投影真实可达边。阶段编号不产生前置。 */
 function overviewPlan(plan: SchedulePlan): SchedulePlan {
     const selected = plan.tasks.filter(task => {
         if (!task.phase) return false;
@@ -83,202 +84,322 @@ function stagePlan(plan: SchedulePlan, phase: string): { plan: SchedulePlan; ext
         depends_on: task.depends_on.filter(id => included.has(id)) })) }, external };
 }
 
-/** 图中前置边只读取显式 depends_on，不引用架构边或阅读顺序。 */
-function diagram(plan: SchedulePlan, lang: Language, key: string, external = new Set<string>()): string {
-    const tasks = plan.tasks;
-    if (tasks.length === 0)
-        return '<p class="muted">' + words('尚无登记任务。', 'No registered tasks.', lang) + '</p>';
-    const byId = new Map(tasks.map(task => [task.id, task]));
+/** 历史占用只补冲突端点。开关不得移除任何真实前置。 */
+function withHistory(value: SchedulePlan, source: SchedulePlan): {
+    plan: SchedulePlan; historyOnly: Set<string>; legacy: Set<string>;
+} {
+    const included = new Set(value.tasks.map(task => task.id));
+    const unscheduled = new Set(source.unscheduled);
+    const legacy = new Set(source.running.filter(id => unscheduled.has(id)));
+    const historyOnly = new Set<string>();
+    for (const conflict of source.conflicts) {
+        if (included.has(conflict.left) && legacy.has(conflict.right) && !included.has(conflict.right))
+            historyOnly.add(conflict.right);
+        if (included.has(conflict.right) && legacy.has(conflict.left) && !included.has(conflict.left))
+            historyOnly.add(conflict.left);
+    }
+    const tasks = [...value.tasks, ...source.tasks.filter(task => historyOnly.has(task.id))];
+    const all = new Set(tasks.map(task => task.id));
+    return { plan: { ...value, tasks: tasks.map(task => ({ ...task,
+        depends_on: task.depends_on.filter(id => all.has(id)) })) }, historyOnly, legacy };
+}
+
+function shortTitle(task: Task, lang: Language): string {
+    if (lang === 'en') return taskTitle(task, lang);
+    return taskTitle(task, lang).replace(/-(?:CONTRACT|HOST|BASE|UPLOAD|ENTRY)/g, ' ')
+        .replace(/阶段切片|全量矩阵与|全部61族|全量|与门槛|与资产/g, '').replace(/准入$/, '').trim();
+}
+
+/** 实线仅用显式前置；主线用真实依赖路径的传递约简。 */
+function diagram(value: SchedulePlan, source: SchedulePlan, lang: Language, key: string,
+    external = new Set<string>()): string {
+    if (!source.ok) return '<p class="graph-message">' + words('排程含错误。请先修复。',
+        'Schedule errors prevent a valid dependency graph.', lang) + '</p>';
+    if (!value.tasks.length) return '<p class="graph-message">' + words('尚无可识别门禁。请看完整依赖。',
+        'No recognizable gates. Open all dependencies.', lang) + '</p>';
+    const { plan, historyOnly, legacy } = withHistory(value, source);
+    const core = plan.tasks.filter(task => !historyOnly.has(task.id));
+    const byId = new Map(core.map(task => [task.id, task]));
     const ranks = new Map<string, number>();
     const visiting = new Set<string>();
     const rank = (id: string): number => {
         const hit = ranks.get(id);
-        if (hit !== undefined)
-            return hit;
-        if (visiting.has(id))
-            return 0;
+        if (hit !== undefined) return hit;
+        if (visiting.has(id)) return 0;
         visiting.add(id);
         let value = 0;
-        for (const predecessor of lines(byId.get(id)?.depends_on)) {
-            if (byId.has(predecessor))
-                value = Math.max(value, rank(predecessor) + 1);
+        for (const predecessor of byId.get(id)?.depends_on ?? []) {
+            if (byId.has(predecessor)) value = Math.max(value, rank(predecessor) + 1);
         }
         visiting.delete(id);
         ranks.set(id, value);
         return value;
     };
-    tasks.forEach(task => rank(task.id));
+    core.forEach(task => rank(task.id));
     const columns = new Map<number, Task[]>();
-    for (const task of tasks) {
+    for (const task of core) {
         const level = ranks.get(task.id) ?? 0;
         columns.set(level, [...(columns.get(level) ?? []), task]);
     }
-    const nodeWidth = 286;
-    const nodeHeight = 126;
-    const xStep = 350;
-    const yStep = 162;
+    const compact = key === 'overview';
+    const nodeWidth = compact ? 154 : 286;
+    const nodeHeight = compact ? 76 : 126;
+    const xStep = compact ? 184 : 350;
+    const yStep = compact ? 102 : 162;
+    const maxLevel = Math.max(...columns.keys());
     const positions = new Map<string, { x: number; y: number }>();
-    for (const [level, members] of columns) {
-        members.forEach((task, index) => positions.set(task.id, { x: 26 + level * xStep, y: 58 + index * yStep }));
+    let baseHeight = 0;
+    if (compact) {
+        // 折行只压缩视觉布局。箭头仍指向真实后继。
+        for (let band = 0; band <= Math.floor(maxLevel / 5); band++) {
+            const levels = Array.from({ length: 5 }, (_, index) => band * 5 + index);
+            const count = Math.max(1, ...levels.map(level => columns.get(level)?.length ?? 0));
+            for (const level of levels) {
+                columns.get(level)?.forEach((task, index) => positions.set(task.id,
+                    { x: 24 + (level % 5) * xStep, y: baseHeight + 24 + index * yStep }));
+            }
+            baseHeight += count * yStep + 28;
+        }
+    } else {
+        for (const [level, members] of columns)
+            members.forEach((task, index) => positions.set(task.id, { x: 24 + level * xStep, y: 34 + index * yStep }));
+        baseHeight = Math.max(180, ...[...columns.values()].map(members => 46 + members.length * yStep));
     }
-    const width = Math.max(720, columns.size * xStep + 20);
-    const height = Math.max(220, ...[...columns.values()].map(members => 72 + members.length * yStep));
+    const baseWidth = Math.max(compact ? 360 : 720, 48 + Math.min(maxLevel + 1, compact ? 5 : Infinity) * xStep);
+    const added = plan.tasks.filter(task => historyOnly.has(task.id));
+    added.forEach((task, index) => positions.set(task.id, { x: 24 + index * xStep, y: baseHeight + 24 }));
+    const width = Math.max(baseWidth, added.length * xStep + 48);
+    const height = baseHeight + (added.length ? nodeHeight + 48 : 0);
     const edges: string[] = [];
-    for (const task of tasks) {
+    for (const task of plan.tasks) {
         const to = positions.get(task.id)!;
-        for (const predecessor of lines(task.depends_on)) {
+        for (const predecessor of task.depends_on) {
             const from = positions.get(predecessor);
-            if (from === undefined)
-                continue;
-            const x1 = from.x + nodeWidth;
-            const x2 = to.x;
-            const y1 = from.y + nodeHeight / 2;
-            const y2 = to.y + nodeHeight / 2;
-            edges.push('<path class="prerequisite" marker-end="url(#arrow-' + key + '-' + lang + ')" d="M '
-                + x1 + ' ' + y1 + ' C ' + (x1 + 36) + ' ' + y1 + ', ' + (x2 - 36) + ' ' + y2
-                + ', ' + x2 + ' ' + y2 + '"><title>' + escape(predecessor + ' → ' + task.id) + '</title></path>');
+            if (!from) continue;
+            let path: string;
+            if (compact && to.y > from.y + nodeHeight && to.x <= from.x) {
+                const x1 = from.x + nodeWidth / 2, x2 = to.x + nodeWidth / 2;
+                const y1 = from.y + nodeHeight, y2 = to.y;
+                path = 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + 24) + ', '
+                    + x2 + ' ' + (y2 - 24) + ', ' + x2 + ' ' + y2;
+            } else {
+                const x1 = from.x + nodeWidth, x2 = to.x;
+                const y1 = from.y + nodeHeight / 2, y2 = to.y + nodeHeight / 2;
+                path = 'M ' + x1 + ' ' + y1 + ' C ' + (x1 + 18) + ' ' + y1 + ', '
+                    + (x2 - 18) + ' ' + y2 + ', ' + x2 + ' ' + y2;
+            }
+            edges.push('<path class="prerequisite" data-from="' + escape(predecessor) + '" data-to="'
+                + escape(task.id) + '" marker-end="url(#arrow-' + key + '-' + lang + ')" d="' + path
+                + '"><title>' + escape(predecessor + ' → ' + task.id) + '</title></path>');
         }
     }
-    for (const conflict of plan.conflicts) {
-        const from = positions.get(conflict.left);
-        const to = positions.get(conflict.right);
-        if (from === undefined || to === undefined)
-            continue;
-        const reason = [...lines(conflict.modules), ...lines(conflict.files), ...lines(conflict.resources)].join(', ');
-        edges.push('<path class="conflict-edge" d="M ' + (from.x + nodeWidth / 2) + ' ' + (from.y + nodeHeight)
+    for (const conflict of source.conflicts) {
+        const from = positions.get(conflict.left), to = positions.get(conflict.right);
+        if (!from || !to) continue;
+        // 路径和资源清单只在详情保存，避免各视图反复展开。
+        edges.push('<path class="conflict-edge' + (legacy.has(conflict.left) || legacy.has(conflict.right)
+            ? ' history-conflict' : '') + '" data-left="' + escape(conflict.left) + '" data-right="'
+            + escape(conflict.right) + '" d="M ' + (from.x + nodeWidth / 2) + ' ' + (from.y + nodeHeight)
             + ' Q ' + (Math.max(from.x, to.x) + nodeWidth + 18) + ' ' + ((from.y + to.y) / 2 + nodeHeight)
             + ', ' + (to.x + nodeWidth / 2) + ' ' + (to.y + nodeHeight) + '"><title>'
-            + escape(reason) + '</title></path>');
+            + escape(conflict.left + ' ↔ ' + conflict.right) + '</title></path>');
     }
-    const headings = [...columns.keys()].map(level => '<text class="level-label" x="' + (26 + level * xStep)
-        + '" y="30">' + words('前置层 ', 'Dependency level ', lang) + level + '</text>');
-    const nodes = tasks.map(task => {
+    const nodes = plan.tasks.map(task => {
         const position = positions.get(task.id)!;
-        const title = titleLines(taskTitle(task, lang));
+        const title = titleLines(compact ? shortTitle(task, lang) : taskTitle(task, lang), nodeWidth - 28);
         return '<g class="task-node ' + escape(task.readiness) + (external.has(task.id) ? ' external' : '')
-            + '" data-task-id="' + escape(task.id) + '" transform="translate(' + position.x + ',' + position.y + ')">'
-            + '<title>' + escape(task.id + '\n' + taskTitle(task, lang) + '\n' + lines(task.blockers).join('\n')) + '</title>'
-            + '<rect width="' + nodeWidth + '" height="' + nodeHeight + '" rx="10"/>'
-            + '<text class="task-name" x="14" y="28">' + escape(title[0]) + '</text>'
-            + (title[1] ? '<text class="task-name" x="14" y="49">' + escape(title[1]) + '</text>' : '')
-            + '<text class="task-id" x="14" y="76">' + escape(task.id.length > 39 ? task.id.slice(0, 36) + '…' : task.id) + '</text>'
-            + '<text class="task-state" x="14" y="101">' + escape(task.status + ' · ' + task.readiness
-                + (external.has(task.id) ? words(' · 外部前置', ' · external prerequisite', lang) : '')) + '</text>'
-            + '</g>';
+            + (historyOnly.has(task.id) ? ' history-node' : '') + '" data-task-id="' + escape(task.id)
+            + '" data-phase="' + escape(task.phase ?? '') + '" data-x="' + position.x + '" data-y="'
+            + position.y + '" role="button" tabindex="0" aria-label="' + escape(taskTitle(task, lang) + ' ' + task.id)
+            + '" transform="translate(' + position.x + ',' + position.y + ')"><title>'
+            + escape(task.id + '\n' + taskTitle(task, lang)) + '</title><rect width="' + nodeWidth
+            + '" height="' + nodeHeight + '" rx="8"/><text class="task-name" x="14" y="25">'
+            + escape(title[0]) + '</text>' + (title[1] ? '<text class="task-name" x="14" y="45">'
+                + escape(title[1]) + '</text>' : '')
+            + (compact ? '' : '<text class="task-id" x="14" y="76">'
+                + escape(task.id.length > 39 ? task.id.slice(0, 36) + '…' : task.id) + '</text>')
+            + '<text class="task-state" x="14" y="' + (compact ? 63 : 101) + '">'
+            + escape((compact ? task.readiness : task.status + ' · ' + task.readiness)
+                + (external.has(task.id) ? words(' · 外部前置', ' · external prerequisite', lang) : '')) + '</text></g>';
     });
-    return '<div class="diagram-controls"><button type="button" data-zoom="in">+</button>'
-        + '<button type="button" data-zoom="out">−</button><button type="button" data-zoom="fit">'
-        + words('适应画布', 'Fit', lang) + '</button><button type="button" data-conflicts>'
-        + words('显示冲突', 'Show conflicts', lang) + '</button><span class="muted">'
-        + words('滚轮缩放，拖动画布。', 'Wheel to zoom; drag to pan.', lang) + '</span></div>'
-        + '<div class="diagram-scroll"><svg role="img" aria-label="' + words('开发前置流程图', 'Development dependency diagram', lang)
-        + '" width="' + width + '" height="' + height + '" viewBox="0 0 ' + width + ' ' + height
-        + '" data-width="' + width + '" data-height="' + height + '"><defs><marker id="arrow-' + key + '-' + lang
-        + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">'
-        + '<path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)"/></marker></defs>'
-        + headings.join('') + edges.join('') + nodes.join('') + '</svg></div>';
+    return '<svg role="group" aria-label="' + words('开发前置流程图', 'Development dependency diagram', lang)
+        + '" viewBox="0 0 ' + width + ' ' + height + '" data-width="' + width + '" data-height="' + height
+        + '" data-base-width="' + baseWidth + '" data-base-height="' + baseHeight
+        + '" data-node-width="' + nodeWidth + '" data-node-height="' + nodeHeight + '"><defs><marker id="arrow-'
+        + key + '-' + lang + '" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">'
+        + '<path d="M 0 0 L 10 5 L 0 10 z" fill="#0284c7"/></marker></defs>'
+        + edges.join('') + nodes.join('') + '</svg>';
 }
 
-function content(plan: SchedulePlan, lang: Language): string {
-    const named = new Map(plan.tasks.map(task => [task.id, taskTitle(task, lang)]));
-    const taskNames = (ids: unknown): string => lines(ids).map(id => escape(named.get(id) ?? id)).join(' · ') || '—';
-    const cards = [
-        [words('就绪', 'Ready', lang), plan.ready, 'ready'],
-        [words('运行', 'Running', lang), plan.running, 'running'],
-        [words('阻断', 'Blocked', lang), plan.blocked, 'blocked'],
-        [words('未登记', 'Unscheduled', lang), plan.unscheduled, 'unscheduled'],
-        [words('已完成', 'Completed', lang), plan.completed, 'completed'],
-    ].map(([label, values, css]) => '<div class="card ' + css + '"><h2>' + label + ' <span>'
-        + lines(values).length + '</span></h2><p>' + taskNames(values) + '</p></div>').join('');
-    const waves = plan.waves.map((wave, index) => '<li><strong>' + words('波次 ', 'Wave ', lang) + (index + 1)
-        + '</strong><p>' + taskNames(wave) + '</p></li>').join('');
-    const conflicts = plan.conflicts.map(conflict => '<tr><td>' + escape(conflict.left) + '<br>' + escape(conflict.right)
-        + '</td><td>' + list(conflict.modules) + '</td><td>' + list(conflict.files) + '</td><td>' + list(conflict.resources) + '</td></tr>').join('');
-    const tasks = plan.tasks.map(task => '<tr data-task="' + escape(task.id + ' ' + taskTitle(task, lang)) + '">'
-        + '<td><strong>' + escape(taskTitle(task, lang)) + '</strong><br><code>' + escape(task.id) + '</code></td>'
-        + '<td>' + escape(task.status) + '<br>' + escape(task.readiness) + '</td>'
-        + '<td>' + escape(task.phase ?? '—') + '<br>' + escape(task.owner ?? '—') + '</td>'
-        + '<td>' + list(task.depends_on) + '</td><td>' + list(task.blockers) + '</td>'
-        + '<td>' + list(task.modules) + '</td><td>' + list(task.files) + '</td><td>' + list(task.resources) + '</td></tr>').join('');
-    const phases = [...new Set(plan.tasks.map(task => task.phase).filter((phase): phase is string => !!phase))]
-        .sort((left, right) => left.localeCompare(right, 'en', { numeric: true }));
-    const views = ['<button type="button" data-view="overview">' + words('阶段总览', 'Overview', lang) + '</button>',
-        ...phases.map((phase, index) => '<button type="button" data-view="phase-' + index + '">' + escape(phase) + '</button>'),
-        '<button type="button" data-view="full">' + words('完整任务图', 'All tasks', lang) + '</button>'].join('');
-    const graph = (value: SchedulePlan, key: string, external?: Set<string>): string => plan.ok
-        ? diagram(value, lang, key, external) : '<p class="notice">'
-            + words('排程含错误。修复后再读依赖图。', 'Schedule errors prevent a valid dependency diagram.', lang) + '</p>';
-    const graphs = '<div data-graph-view="overview">' + graph(overviewPlan(plan), 'overview') + '</div>'
-        + phases.map((phase, index) => {
-            const stage = stagePlan(plan, phase);
-            return '<div data-graph-view="phase-' + index + '" hidden>' + graph(stage.plan, 'phase-' + index, stage.external) + '</div>';
-        }).join('') + '<div data-graph-view="full" hidden>' + graph(plan, 'full') + '</div>';
+function jump(task: Task | undefined, id: string, lang: Language): string {
+    return '<button type="button" class="jump" data-jump="' + escape(id) + '">'
+        + escape(task ? taskTitle(task, lang) : id) + '<small>' + escape(id) + '</small></button>';
+}
+
+function taskDetails(plan: SchedulePlan, lang: Language): string {
+    const byId = new Map(plan.tasks.map(task => [task.id, task]));
+    const jumps = (ids: string[]): string => ids.length ? '<ul>' + ids.map(id => '<li>'
+        + jump(byId.get(id), id, lang) + '</li>').join('') + '</ul>' : '<p class="muted">—</p>';
+    return plan.tasks.map(task => {
+        const successors = plan.tasks.filter(other => other.depends_on.includes(task.id)).map(other => other.id);
+        const blockers = task.blockers.length ? '<ul>' + task.blockers.map(blocker => {
+            const match = /^(dependency|conflict):(.+)$/.exec(blocker);
+            return '<li>' + (match ? escape(match[1] === 'dependency' ? words('前置未放行', 'Prerequisite pending', lang)
+                : words('写入冲突', 'Write conflict', lang)) + jump(byId.get(match[2]), match[2], lang) : escape(blocker)) + '</li>';
+        }).join('') + '</ul>' : '<p class="muted">—</p>';
+        return '<article data-detail-task="' + escape(task.id) + '" data-language="' + lang + '" hidden><h2>'
+            + escape(taskTitle(task, lang)) + '</h2><code>' + escape(task.id) + '</code><p class="muted">'
+            + words('登记状态：', 'Recorded state: ', lang)
+            + escape(task.status + ' · ' + task.readiness + ' · ' + (task.phase ?? '—') + ' · ' + (task.owner ?? '—'))
+            + '</p><p class="muted">' + words('此状态并非产品验收。', 'This state is not product acceptance.', lang)
+            + '</p><h3>' + words('阻塞', 'Blockers', lang) + '</h3>' + blockers
+            + '<h3>' + words('真实前置', 'Actual prerequisites', lang) + '</h3>' + jumps(task.depends_on)
+            + '<h3>' + words('后续', 'Successors', lang) + '</h3>' + jumps(successors.slice(0, 8))
+            + (successors.length > 8 ? '<details class="successor-overflow"><summary>'
+                + words('其余 ', 'Remaining ', lang) + (successors.length - 8) + '</summary>' + jumps(successors.slice(8)) + '</details>' : '')
+            + '<h3>' + words('写入', 'Write paths', lang) + '</h3>' + list(task.files)
+            + '<h3>' + words('独占资源', 'Exclusive resources', lang) + '</h3>' + list(task.resources)
+            + '<details><summary>' + words('模块', 'Modules', lang) + '</summary>' + list(task.modules) + '</details></article>';
+    }).join('');
+}
+
+/** 登记清单去重；选中冲突时仍可查全部原始登记值。 */
+function packedConflicts(plan: SchedulePlan): {
+    sets: string[][]; pairs: { left: string; right: string; modules: number; files: number; resources: number }[];
+} {
+    const sets: string[][] = [];
+    const indices = new Map<string, number>();
+    const intern = (values: string[]): number => {
+        const key = JSON.stringify(values);
+        const hit = indices.get(key);
+        if (hit !== undefined) return hit;
+        const index = sets.length;
+        sets.push(values);
+        indices.set(key, index);
+        return index;
+    };
+    return { sets, pairs: plan.conflicts.map(conflict => ({ left: conflict.left, right: conflict.right,
+        modules: intern(conflict.modules), files: intern(conflict.files), resources: intern(conflict.resources) })) };
+}
+
+function supplementary(plan: SchedulePlan, lang: Language): string {
+    const byId = new Map(plan.tasks.map(task => [task.id, task]));
     const diagnostics = [...plan.errors, ...plan.warnings].map(item => '<li><code>' + escape(item.code)
         + '</code> ' + escape(item.message) + '</li>').join('');
-    return '<section data-language="' + lang + '"><p class="notice">'
-        + words('实时只读排程。刷新读取当前模块与变更。任务状态不等于产品验收。实线表示前置；总览实线表示真实依赖路径。橙色虚线只表示写入或资源冲突，不代表开发前置。',
-            'Live read-only schedule; refresh reads current modules and changes. Task states do not prove product acceptance. Solid arrows show prerequisites; overview arrows project real dependency paths. Orange dashed lines only show write/resource conflicts, not prerequisites.', lang)
-        + '</p><div class="cards">' + cards + '</div><h2>' + words('任务前置图', 'Prerequisite graph', lang) + '</h2>'
-        + '<p class="muted">' + words('总览省略独立任务。阶段标签不规定串行顺序。阶段细图保留外部前置；其余前置见任务表。架构deps与阅读order不参与排程。',
-            'Overview omits independent tasks. Phase labels do not impose sequential development. Stage graphs retain external prerequisites; the task table shows all dependencies. Architecture deps and reading order never determine scheduling.', lang)
-        + '</p><nav class="view-controls">' + views + '</nav>' + graphs
-        + '<h2>' + words('排程诊断', 'Schedule diagnostics', lang) + '</h2><ul>' + (diagnostics || '<li>—</li>') + '</ul>'
-        + '<h2>' + words('预测串行波次', 'Predicted sequential waves', lang) + '</h2><p class="muted">'
-        + words('同波仅表示无登记冲突。仍须人工确认资源与接口。依次集成各波成果。不承诺工期或自动执行。',
-            'Tasks in one wave have no registered conflict; confirm interfaces and resources manually. Integrate waves in order. Waves are not calendar estimates or automatic execution.', lang)
-        + '</p><ol class="waves">' + (waves || '<li>—</li>') + '</ol><h2>' + words('并行冲突', 'Parallel conflicts', lang) + '</h2>'
-        + '<div class="table-scroll"><table><thead><tr><th>' + words('任务对', 'Task pair', lang) + '</th><th>' + words('模块', 'Modules', lang)
-        + '</th><th>' + words('写入路径', 'Write paths', lang) + '</th><th>' + words('独占资源', 'Exclusive resources', lang)
-        + '</th></tr></thead><tbody>' + (conflicts || '<tr><td colspan="4">—</td></tr>') + '</tbody></table></div>'
-        + '<h2>' + words('任务明细', 'Task details', lang) + '</h2><div class="table-scroll"><table class="task-table"><thead><tr>'
-        + [words('任务', 'Task', lang), words('状态', 'Status', lang), words('阶段 / 负责人', 'Phase / owner', lang),
-            words('前置', 'Prerequisites', lang), words('阻断原因', 'Blockers', lang), words('模块', 'Modules', lang),
-            words('写入路径', 'Write paths', lang), words('独占资源', 'Exclusive resources', lang)]
-            .map(label => '<th>' + label + '</th>').join('')
-        + '</tr></thead><tbody>' + tasks + '</tbody></table></div></section>';
+    const waves = plan.waves.map((wave, index) => '<li>' + words('波次 ', 'Wave ', lang) + (index + 1)
+        + '<ul>' + wave.map(id => '<li>' + jump(byId.get(id), id, lang) + '</li>').join('') + '</ul></li>').join('');
+    const conflicts = plan.conflicts.map((conflict, index) => '<li data-conflict-left="' + escape(conflict.left)
+        + '" data-conflict-right="' + escape(conflict.right) + '"><button class="jump" type="button" data-conflict-index="'
+        + index + '">' + escape(conflict.left + ' ↔ ' + conflict.right) + '</button></li>').join('');
+    return '<section class="supplementary" data-language="' + lang + '"><details><summary>'
+        + words('排程诊断', 'Schedule diagnostics', lang) + ' (' + (plan.errors.length + plan.warnings.length)
+        + ')</summary><ul>' + (diagnostics || '<li>—</li>') + '</ul></details><details><summary>'
+        + words('候选波次', 'Candidate waves', lang) + ' (' + plan.waves.length + ')</summary><p class="muted">'
+        + words('分叉不代表并行许可。波次不承诺工期。人工核对接口与资源。',
+            'Branches do not permit parallel work. Waves are not time commitments. Check interfaces and resources.', lang)
+        + '</p><ol>' + (waves || '<li>—</li>') + '</ol></details><details><summary>'
+        + words('冲突明细', 'Conflict records', lang) + ' (' + plan.conflicts.length + ')</summary><p class="muted">'
+        + words('选任务后过滤相关冲突。点击任务对查看完整登记。',
+            'Selection filters related conflicts. Choose a pair for its full recorded claims.', lang)
+        + '</p><ul class="conflict-records">' + (conflicts || '<li>—</li>') + '</ul></details><details><summary>'
+        + words('全部任务', 'All task records', lang) + ' (' + plan.tasks.length + ')</summary><ul>'
+        + plan.tasks.map(task => '<li>' + jump(task, task.id, lang) + '<small>'
+            + escape(task.status + ' · ' + task.readiness) + '</small></li>').join('') + '</ul></details></section>';
 }
 
-/** 自包含排程查看器；不加载脚本包，也不执行源数据。 */
+function jsonData(value: unknown): string {
+    return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g,
+        char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
+/** 自包含画布。源数据只作文本，不进入脚本源码。 */
 export function renderScheduleTemplate(plan: SchedulePlan, summary: RenderSummary,
     opts: { lang?: string; theme?: string; live?: boolean; contentHash?: string; nonce?: string } = {}): string {
-    const lang = opts.lang === 'en' ? 'en' : 'zh';
-    const theme = opts.theme === 'light' ? 'light' : 'dark';
+    const lang: Language = opts.lang === 'en' ? 'en' : 'zh';
+    const theme = opts.theme === 'dark' ? 'dark' : 'light';
+    const allPhases = [...new Set(plan.tasks.map(task => task.phase).filter((phase): phase is string => !!phase))]
+        .sort((left, right) => left.localeCompare(right, 'en', { numeric: true }));
+    const phases = allPhases;
+    const overview = overviewPlan(plan);
+    const graphPanels = (['zh', 'en'] as Language[]).map(language => {
+        const panel = (value: SchedulePlan, key: string, external?: Set<string>): string =>
+            '<div class="graph-panel" data-language="' + language + '" data-graph-view="' + key
+                + '"' + (language !== lang || key !== 'overview' ? ' hidden' : '') + '>'
+                + diagram(value, plan, language, key, external) + '</div>';
+        return panel(overview, 'overview') + phases.map((phase, index) => {
+            const stage = stagePlan(plan, phase);
+            return panel(stage.plan, 'phase-' + index, stage.external);
+        }).join('') + panel(plan, 'full');
+    }).join('');
+    const label = (zh: string, en: string): string => ' data-zh="' + escape(zh) + '" data-en="' + escape(en)
+        + '">' + escape(words(zh, en, lang));
+    const data = { phases, tasks: plan.tasks.map(task => ({ id: task.id, title: task.title, phase: task.phase })),
+        conflicts: packedConflicts(plan) };
     return `<!DOCTYPE html>
-<html lang="${lang}" data-theme="${theme}">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="normify"><title>${escape(summary.name)} · Normify Schedule</title>
-<style>
-:root{--bg:#0b1220;--panel:#111a2c;--text:#e6edf7;--muted:#93a4bf;--border:#24344f;--accent:#38bdf8;--warn:#fbbf24;--good:#34d399;--danger:#f87171}
-[data-theme=light]{--bg:#f6f8fc;--panel:#fff;--text:#16233b;--muted:#5c6b85;--border:#d7dfec;--accent:#0284c7;--warn:#b45309;--good:#059669;--danger:#dc2626}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif}
-header{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:16px 24px;background:var(--panel);border-bottom:1px solid var(--border)}
-header h1{margin:0;font-size:20px;color:var(--accent)}.controls{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
-button,input{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 10px}button{cursor:pointer}
-main{max-width:1440px;margin:auto;padding:24px}h2{font-size:18px}.notice{padding:14px;border-left:3px solid var(--accent);background:var(--panel);line-height:1.8}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px;overflow-wrap:anywhere}
-.card h2{font-size:16px;margin:0}.card h2 span{float:right;color:var(--accent)}.card p{font-size:13px;line-height:1.6}.muted{color:var(--muted)}
-.diagram-scroll,.table-scroll{overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--panel)}.diagram-scroll{height:65vh;min-height:280px;overflow:hidden;touch-action:none;cursor:grab}.diagram-scroll.dragging{cursor:grabbing}.diagram-scroll svg{width:100%;height:100%;user-select:none}.diagram-controls,.view-controls{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.view-controls button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
-svg{display:block}.level-label{fill:var(--muted);font-size:14px}.prerequisite{fill:none;stroke:var(--accent);stroke-width:2}.conflict-edge{display:none;fill:none;stroke:var(--warn);stroke-width:1.5;stroke-dasharray:6 5;opacity:.65}.show-conflicts .conflict-edge{display:block}.task-node.external rect{stroke-dasharray:8 4}
-.task-node rect{fill:var(--panel);stroke:var(--border);stroke-width:2}.task-node.ready rect,.task-node.verified rect{stroke:var(--good)}.task-node.in_progress rect{stroke:var(--accent)}.task-node.blocked rect{stroke:var(--danger)}.task-node.unscheduled rect{stroke-dasharray:5 4}.task-node.abandoned rect{opacity:.6;stroke-dasharray:3 3}
-.task-name{fill:var(--text);font-size:14px;font-weight:600}.task-id,.task-state{fill:var(--muted);font-size:11px}.waves{display:flex;gap:12px;flex-wrap:wrap;padding-left:24px}.waves li{background:var(--panel);padding:12px;min-width:180px;max-width:320px;overflow-wrap:anywhere}.waves p{font-size:13px;line-height:1.6}
-table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:10px;vertical-align:top;text-align:left;border-bottom:1px solid var(--border);overflow-wrap:anywhere}th{color:var(--muted)}code{font-size:11px}.task-table{min-width:1050px}
-footer{text-align:center;padding:20px;color:var(--muted);font-size:12px}[hidden]{display:none!important}
-@media print{.controls{display:none}.diagram-scroll{max-height:none}.table-scroll{overflow:visible}body{background:white;color:black}}
-</style></head><body><header><h1>${escape(summary.name)} · Normify Schedule</h1><div class="controls">
-<input id="search" placeholder="搜索任务 / Filter tasks" aria-label="Filter tasks"><button id="refresh">刷新 / Refresh</button><button id="lang">中文 / EN</button><button id="theme">主题 / Theme</button>
-</div></header><main>${content(plan, 'zh')}${content(plan, 'en')}</main>
-<footer>schema ${plan.schema_version} · content ${escape(opts.contentHash ?? '')} · ${plan.tasks.length} tasks<br>
-实时排程，不是Git或产品验收。URL随MCP退出失效。空闲30分钟后服务关闭。<br>Live schedule, not Git or product acceptance. URL expires with MCP or after 30 idle minutes.</footer>
-<script${opts.nonce ? ' nonce="' + escape(opts.nonce) + '"' : ''}>(function(){'use strict';var language=document.documentElement.lang;function show(){document.querySelectorAll('[data-language]').forEach(function(section){section.hidden=section.dataset.language!==language})}show();
-document.getElementById('lang').addEventListener('click',function(){language=language==='zh'?'en':'zh';document.documentElement.lang=language;show()});
-document.getElementById('theme').addEventListener('click',function(){document.documentElement.dataset.theme=document.documentElement.dataset.theme==='light'?'dark':'light'});
-document.getElementById('search').addEventListener('input',function(event){var query=event.target.value.toLowerCase();document.querySelectorAll('[data-task]').forEach(function(row){row.hidden=row.dataset.task.toLowerCase().indexOf(query)<0})});
-document.getElementById('refresh').addEventListener('click',function(){location.reload()});
-document.querySelectorAll('[data-language]').forEach(function(section){section.querySelectorAll('[data-view]').forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.view==='overview'));button.addEventListener('click',function(){section.querySelectorAll('[data-graph-view]').forEach(function(graph){graph.hidden=graph.dataset.graphView!==button.dataset.view});section.querySelectorAll('[data-view]').forEach(function(other){other.setAttribute('aria-pressed',String(other===button))})})});
-section.querySelectorAll('.diagram-scroll').forEach(function(canvas){var svg=canvas.querySelector('svg'),controls=canvas.previousElementSibling,w=Number(svg.dataset.width),h=Number(svg.dataset.height),box=[0,0,w,h],drag=null;function draw(){svg.setAttribute('viewBox',box.join(' '))}function zoom(factor,x,y){var scale=Math.max(.05,Math.min(8,box[2]/w*factor)),nw=w*scale,nh=h*scale,px=x===undefined?.5:x,py=y===undefined?.5:y;box=[box[0]+(box[2]-nw)*px,box[1]+(box[3]-nh)*py,nw,nh];draw()}function coordinates(event){var matrix=svg.getScreenCTM();if(!matrix)return null;return new DOMPoint(event.clientX,event.clientY).matrixTransform(matrix.inverse())}
-controls.querySelectorAll('[data-zoom]').forEach(function(button){button.addEventListener('click',function(){if(button.dataset.zoom==='fit'){box=[0,0,w,h];draw()}else zoom(button.dataset.zoom==='in'?.8:1.25)})});controls.querySelector('[data-conflicts]').addEventListener('click',function(){canvas.classList.toggle('show-conflicts');this.setAttribute('aria-pressed',String(canvas.classList.contains('show-conflicts')))});
-canvas.addEventListener('wheel',function(event){event.preventDefault();var point=coordinates(event);if(point)zoom(event.deltaY<0?.85:1.18,(point.x-box[0])/box[2],(point.y-box[1])/box[3])},{passive:false});
-canvas.addEventListener('pointerdown',function(event){if(event.button!==0)return;var point=coordinates(event);if(!point)return;drag={id:event.pointerId,x:point.x,y:point.y};canvas.setPointerCapture(event.pointerId);canvas.classList.add('dragging')});canvas.addEventListener('pointermove',function(event){if(!drag||drag.id!==event.pointerId)return;var point=coordinates(event);if(!point)return;box[0]+=drag.x-point.x;box[1]+=drag.y-point.y;draw()});function stop(event){if(!drag||drag.id!==event.pointerId)return;drag=null;canvas.classList.remove('dragging');if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId)}canvas.addEventListener('pointerup',stop);canvas.addEventListener('pointercancel',stop);canvas.addEventListener('lostpointercapture',function(){drag=null;canvas.classList.remove('dragging')});
-})});
+<html lang="${lang}" data-theme="${theme}"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="normify"><title>${escape(summary.name)} · Normify Schedule</title><style>
+:root{--panel:#fff;--text:#16233b;--muted:#5c6b85;--border:#d7dfec;--accent:#0284c7;--warn:#b45309}
+[data-theme=dark]{--panel:#111a2c;--text:#e6edf7;--muted:#a0aec3;--border:#34455f;--accent:#38bdf8;--warn:#fbbf24}
+*{box-sizing:border-box}html,body{height:100%;margin:0;overflow:hidden}body{background:var(--panel);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;font-size:12px}
+#schedule-shell{height:100dvh;display:flex;flex-direction:column;overflow:hidden}header{flex:none;border-bottom:1px solid var(--border)}.toolbar-row{display:flex;align-items:center;gap:6px;padding:7px 10px;white-space:nowrap;overflow-x:auto}.toolbar-row+ .toolbar-row{border-top:1px solid var(--border);padding-top:5px;padding-bottom:5px}h1{font-size:16px;margin:0 10px 0 0}button,select{font:inherit;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:5px;padding:5px 8px}button{cursor:pointer}button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}label{display:flex;align-items:center;gap:4px}input[type=checkbox]{margin:0}#zoom-percent{width:42px;text-align:center}#locate-select{max-width:270px}#phase-select{max-width:130px}
+#workspace{display:flex;flex:1;min-height:0}#graph-canvas{position:relative;flex:1;min-width:0;min-height:0;background:#fff;overflow:hidden;touch-action:none;cursor:grab}#graph-canvas.dragging{cursor:grabbing}.graph-panel{position:absolute;inset:0}.graph-panel svg{width:100%;height:100%;display:block;user-select:none}.graph-message{margin:24px;color:#52627a}.task-node{cursor:pointer}.task-node rect{fill:white;stroke:#b6c1d2;stroke-width:1.5}.task-node.ready rect,.task-node.verified rect{stroke:#059669}.task-node.in_progress rect{stroke:#0284c7}.task-node.blocked rect{stroke:#dc2626}.task-node.unscheduled rect,.task-node.external rect{stroke-dasharray:5 3}.task-node.abandoned rect{stroke-dasharray:3 3;opacity:.65}.task-node.selected rect,.task-node:focus rect{stroke:#0284c7;stroke-width:3;fill:#eef8ff}.task-node:focus{outline:none}.task-name{fill:#16233b;font-size:14px;font-weight:600}.task-id,.task-state{fill:#52627a;font-size:10px}.prerequisite{fill:none;stroke:#0284c7;stroke-width:1.8}.conflict-edge{display:none;fill:none;stroke:#b45309;stroke-width:1.4;stroke-dasharray:6 5;opacity:.65}.history-node{display:none}.show-history .history-node,.show-history .history-conflict,.conflict-edge.selected-conflict:not(.history-conflict){display:block}
+#detail-panel{width:310px;flex:0 0 310px;min-height:0;overflow:auto;border-left:1px solid var(--border);padding:10px 12px}.detail-heading{display:flex;align-items:center;justify-content:space-between}.detail-heading h2{margin:0;font-size:14px}.detail-heading button{padding:2px 8px}h2{font-size:15px;margin:12px 0 6px;overflow-wrap:anywhere}h3{font-size:12px;margin:12px 0 5px}p{line-height:1.6}.muted{color:var(--muted)}.notice{color:var(--muted);font-size:11px;line-height:1.65;border-left:2px solid var(--accent);padding-left:8px;margin:8px 0}code,small{font-size:10px;overflow-wrap:anywhere}ul,ol{padding-left:18px;line-height:1.6}li{overflow-wrap:anywhere}.jump{display:block;border:0;text-align:left;padding:3px 0;color:var(--accent);max-width:100%;white-space:normal;overflow-wrap:anywhere}.jump small{display:block;color:var(--muted)}details{margin-top:10px}summary{cursor:pointer;font-weight:600}.supplementary{margin-top:16px;border-top:1px solid var(--border);padding-top:3px}#conflict-detail{white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--border);padding:8px;font:10px/1.5 monospace}footer{flex:none;border-top:1px solid var(--border);padding:4px 10px;color:var(--muted);font-size:10px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}[hidden]{display:none!important}
+@media(max-width:700px){#workspace{flex-direction:column}#detail-panel{width:100%;height:35%;flex:0 0 35%;border-left:0;border-top:1px solid var(--border)}h1{max-width:150px;text-overflow:ellipsis;overflow:hidden}.toolbar-row{gap:5px}}
+</style></head><body><div id="schedule-shell"><header>
+<div id="schedule-toolbar-row1" class="toolbar-row"><h1>${escape(summary.name)}</h1>
+<button type="button" id="view-overview" data-mode="overview"${label('准入主线', 'Gate overview')}</button>
+<button type="button" id="view-phase" data-mode="phase"${label('阶段任务', 'Phase tasks')}</button>
+<button type="button" id="view-full" data-mode="full"${label('完整依赖', 'All dependencies')}</button>
+<select id="phase-select" aria-label="Phase"${phases.length ? '' : ' disabled'}>${phases.map((phase, index) => '<option value="'
+    + index + '">' + escape(phase) + '</option>').join('')}</select>
+<label><input id="history-toggle" type="checkbox"><span${label('显示历史占用', 'Historical occupancy')}</span></label></div>
+<div id="schedule-toolbar-row2" class="toolbar-row"><button type="button" id="zoom-in" aria-label="Zoom in">+</button>
+<button type="button" id="zoom-out" aria-label="Zoom out">−</button><output id="zoom-percent">100%</output>
+<button type="button" id="zoom-fit"${label('全图适应', 'Fit')}</button><button type="button" id="zoom-actual">100%</button>
+<select id="locate-select" aria-label="Locate task"><option value=""${label('定位节点', 'Locate node')}</option>${plan.tasks.map(task => '<option value="'
+    + escape(task.id) + '"' + label(task.title.zh + ' · ' + task.id, (task.title.en || task.title.zh) + ' · ' + task.id)
+    + '</option>').join('')}</select><button type="button" id="refresh"${label('刷新', 'Refresh')}</button>
+<button type="button" id="toggle-details" aria-pressed="false"${label('详情', 'Details')}</button>
+<button type="button" id="theme"${label('主题', 'Theme')}</button><button type="button" id="lang">中文 / EN</button></div></header>
+<main id="workspace"><div id="graph-canvas" class="diagram-scroll">${graphPanels}</div>
+<aside id="detail-panel" hidden><div class="detail-heading"><h2${label('任务详情', 'Task details')}</h2><button type="button" id="close-details" aria-label="Close details">×</button></div>
+<p class="notice" data-language="zh">实时排程，不代表产品验收。登记 verified 不证明产品已验收。实线表示真实前置路径。橙色虚线只表示登记冲突。阶段编号不规定串行顺序。</p>
+<p class="notice" data-language="en" hidden>Live schedule, not product acceptance. Recorded verified status is not proof of acceptance. Solid arrows show real prerequisite paths. Orange dashed lines show recorded conflicts only. Phase numbers do not impose serial development.</p>
+<p id="detail-empty" class="muted"${label('点击节点查看任务。主线门禁可跳阶段。', 'Select a task. Overview gates open their phase.')}</p>
+<div id="detail-content">${taskDetails(plan, 'zh')}${taskDetails(plan, 'en')}</div>${supplementary(plan, 'zh')}${supplementary(plan, 'en')}
+<pre id="conflict-detail" hidden></pre></aside></main><footer>实时排程，不代表产品验收。 / Live schedule, not product acceptance. · schema ${plan.schema_version} · content ${escape(opts.contentHash ?? '')} · ${plan.tasks.length} tasks · URL随MCP退出失效；空闲30分钟后关闭。 / URL expires with MCP or after 30 idle minutes.</footer></div>
+<script type="application/json" id="schedule-data">${jsonData(data)}</script>
+<script${opts.nonce ? ' nonce="' + escape(opts.nonce) + '"' : ''}>(function(){'use strict';
+var data=JSON.parse(document.getElementById('schedule-data').textContent),canvas=document.getElementById('graph-canvas');
+var language=document.documentElement.lang,mode='overview',phase='0',selection='',scale=1,box=[0,0,1,1],drag=null,suppressClickUntil=0;
+function task(id){return data.tasks.find(function(item){return item.id===id})}
+function panel(){var key=mode==='phase'?'phase-'+phase:mode;return Array.from(canvas.querySelectorAll('[data-graph-view]')).find(function(item){return item.dataset.language===language&&item.dataset.graphView===key})}
+function svg(){var current=panel();return current&&current.querySelector('svg')}
+function size(){var rect=canvas.getBoundingClientRect();return [Math.max(1,rect.width),Math.max(1,rect.height)]}
+function draw(){var graph=svg();if(graph)graph.setAttribute('viewBox',box.join(' '));document.getElementById('zoom-percent').textContent=Math.round(scale*100)+'%'}
+function setScale(value,x,y){var dimensions=size();scale=Math.max(.03,Math.min(5,value));box=[x-dimensions[0]/scale/2,y-dimensions[1]/scale/2,dimensions[0]/scale,dimensions[1]/scale];draw()}
+function fit(){var graph=svg();if(!graph)return;var history=document.getElementById('history-toggle').checked,w=Number(history?graph.dataset.width:graph.dataset.baseWidth),h=Number(history?graph.dataset.height:graph.dataset.baseHeight),dimensions=size();setScale(Math.min(dimensions[0]/w,dimensions[1]/h)*.94,w/2,h/2)}
+function zoom(factor,px,py){px=px===undefined?.5:px;py=py===undefined?.5:py;var old=scale,next=Math.max(.03,Math.min(5,scale*factor)),nw=box[2]*old/next,nh=box[3]*old/next;box=[box[0]+(box[2]-nw)*px,box[1]+(box[3]-nh)*py,nw,nh];scale=next;draw()}
+function updateSelection(){document.querySelectorAll('[data-detail-task]').forEach(function(item){item.hidden=item.dataset.detailTask!==selection||item.dataset.language!==language});document.getElementById('detail-empty').hidden=!!selection;canvas.querySelectorAll('[data-task-id]').forEach(function(node){node.classList.toggle('selected',node.dataset.taskId===selection)});canvas.querySelectorAll('.conflict-edge').forEach(function(edge){edge.classList.toggle('selected-conflict',!!selection&&(edge.dataset.left===selection||edge.dataset.right===selection))});document.querySelectorAll('[data-conflict-left]').forEach(function(item){item.hidden=!!selection&&item.dataset.conflictLeft!==selection&&item.dataset.conflictRight!==selection});document.getElementById('locate-select').value=selection;document.getElementById('conflict-detail').hidden=true}
+function show(){var key=mode==='phase'?'phase-'+phase:mode;canvas.querySelectorAll('[data-graph-view]').forEach(function(item){item.hidden=item.dataset.language!==language||item.dataset.graphView!==key});document.querySelectorAll('[data-language]').forEach(function(item){if(!item.hasAttribute('data-graph-view')&&!item.hasAttribute('data-detail-task'))item.hidden=item.dataset.language!==language});document.querySelectorAll('[data-mode]').forEach(function(button){button.setAttribute('aria-pressed',String(button.dataset.mode===mode))});canvas.classList.toggle('show-history',document.getElementById('history-toggle').checked);document.querySelectorAll('[data-zh]').forEach(function(item){item.textContent=item.dataset[language]});updateSelection()}
+function view(next){mode=next==='phase'&&!data.phases.length?'full':next;show();fit()}
+function details(visible){document.getElementById('detail-panel').hidden=!visible;document.getElementById('toggle-details').setAttribute('aria-pressed',String(visible))}
+function select(id){if(!task(id))return;var opened=document.getElementById('detail-panel').hidden;selection=id;details(true);updateSelection();if(opened)fit()}
+function center(id){if(!task(id))return;select(id);var graph=svg(),node=graph&&Array.from(graph.querySelectorAll('[data-task-id]')).find(function(item){return item.dataset.taskId===id});if(!node||(node.classList.contains('history-node')&&!document.getElementById('history-toggle').checked)){var selected=task(id),index=selected?data.phases.indexOf(selected.phase):-1;mode=index<0?'full':'phase';if(index>=0){phase=String(index);document.getElementById('phase-select').value=phase}show();graph=svg();node=graph&&Array.from(graph.querySelectorAll('[data-task-id]')).find(function(item){return item.dataset.taskId===id})}if(node&&graph)setScale(Math.max(scale,.8),Number(node.dataset.x)+Number(graph.dataset.nodeWidth)/2,Number(node.dataset.y)+Number(graph.dataset.nodeHeight)/2)}
+function activate(id){var selected=task(id);if(!selected)return;var jumped=mode==='overview';if(jumped){var index=data.phases.indexOf(selected.phase);mode=index<0?'full':'phase';if(index>=0){phase=String(index);document.getElementById('phase-select').value=phase}show();fit()}select(id);if(jumped){var graph=svg(),node=graph&&Array.from(graph.querySelectorAll('[data-task-id]')).find(function(item){return item.dataset.taskId===id});if(node&&typeof node.focus==='function')node.focus()}}
+document.querySelectorAll('[data-mode]').forEach(function(button){button.addEventListener('click',function(){view(button.dataset.mode)})});
+document.getElementById('phase-select').addEventListener('change',function(){phase=this.value;view('phase')});
+document.getElementById('history-toggle').addEventListener('change',function(){canvas.classList.toggle('show-history',this.checked);fit()});
+document.getElementById('zoom-in').addEventListener('click',function(){zoom(1.25)});document.getElementById('zoom-out').addEventListener('click',function(){zoom(.8)});document.getElementById('zoom-fit').addEventListener('click',fit);document.getElementById('zoom-actual').addEventListener('click',function(){setScale(1,box[0]+box[2]/2,box[1]+box[3]/2)});
+document.getElementById('locate-select').addEventListener('change',function(){center(this.value)});document.getElementById('refresh').addEventListener('click',function(){location.reload()});document.getElementById('close-details').addEventListener('click',function(){selection='';updateSelection();details(false);fit()});document.getElementById('toggle-details').addEventListener('click',function(){details(document.getElementById('detail-panel').hidden);fit()});
+document.getElementById('lang').addEventListener('click',function(){language=language==='zh'?'en':'zh';document.documentElement.lang=language;show();fit()});document.getElementById('theme').addEventListener('click',function(){document.documentElement.dataset.theme=document.documentElement.dataset.theme==='light'?'dark':'light'});
+canvas.addEventListener('click',function(event){if(Date.now()<suppressClickUntil){event.preventDefault();return}var node=event.target.closest('[data-task-id]');if(node)activate(node.dataset.taskId)});
+canvas.addEventListener('keydown',function(event){if(event.key!=='Enter'&&event.key!==' ')return;var node=event.target.closest('[data-task-id]');if(node){event.preventDefault();activate(node.dataset.taskId)}});
+document.getElementById('detail-panel').addEventListener('click',function(event){var link=event.target.closest('[data-jump]');if(link){center(link.dataset.jump);return}var record=event.target.closest('[data-conflict-index]');if(!record)return;var conflict=data.conflicts.pairs[Number(record.dataset.conflictIndex)];if(!conflict)return;var claims={left:conflict.left,right:conflict.right,modules:data.conflicts.sets[conflict.modules],files:data.conflicts.sets[conflict.files],resources:data.conflicts.sets[conflict.resources]},output=document.getElementById('conflict-detail');output.textContent=JSON.stringify(claims,null,2);output.hidden=false});
+canvas.addEventListener('wheel',function(event){event.preventDefault();var rect=canvas.getBoundingClientRect();zoom(event.deltaY<0?1.18:.85,(event.clientX-rect.left)/Math.max(1,rect.width),(event.clientY-rect.top)/Math.max(1,rect.height))},{passive:false});
+canvas.addEventListener('pointerdown',function(event){if(event.button!==0||!svg())return;var node=event.target.closest('[data-task-id]');drag={id:event.pointerId,x:event.clientX,y:event.clientY,box:box.slice(),scale:scale,moved:false,task:node?node.dataset.taskId:''};canvas.setPointerCapture(event.pointerId)});
+canvas.addEventListener('pointermove',function(event){if(!drag||drag.id!==event.pointerId)return;var dx=event.clientX-drag.x,dy=event.clientY-drag.y;if(Math.hypot(dx,dy)>4)drag.moved=true;if(drag.moved){canvas.classList.add('dragging');box=[drag.box[0]-dx/drag.scale,drag.box[1]-dy/drag.scale,drag.box[2],drag.box[3]];draw()}});
+function stop(event){if(!drag||drag.id!==event.pointerId)return;var previous=drag;drag=null;canvas.classList.remove('dragging');if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);suppressClickUntil=Date.now()+300;if(!previous.moved&&event.type==='pointerup'&&previous.task)activate(previous.task)}
+canvas.addEventListener('pointerup',stop);canvas.addEventListener('pointercancel',stop);canvas.addEventListener('lostpointercapture',function(){if(drag&&drag.moved)suppressClickUntil=Date.now()+300;drag=null;canvas.classList.remove('dragging')});window.addEventListener('resize',fit);show();fit();
 })()</script></body></html>\n`;
 }

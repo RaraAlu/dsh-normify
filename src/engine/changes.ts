@@ -1,7 +1,8 @@
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CHANGE_STATUSES } from './types.js';
-import type { ChangeData, ChangeModules, ChangeStatus, Diagnostic, LocalizedText, ModuleFile } from './types.js';
+import type { ChangeData, ChangeModules, ChangeSchedule, ChangeStatus, Diagnostic, LocalizedText, ModuleFile } from './types.js';
+import { buildSchedule, l1ValidateSchedule } from './schedule.js';
 import { diag } from './diag.js';
 import { apiKey, isValidId } from './ids.js';
 /**
@@ -10,7 +11,7 @@ import { apiKey, isValidId } from './ids.js';
  */
 export const CHANGE_SCHEMA_VERSION = 1;
 export const CHANGES_DIR = 'changes';
-const CHANGE_KEYS = ['schema_version', 'id', 'title', 'status', 'intent', 'modules', 'acceptance', 'note', 'revision', 'created_at', 'updated_at', 'closed_at'];
+const CHANGE_KEYS = ['schema_version', 'id', 'title', 'status', 'intent', 'modules', 'acceptance', 'schedule', 'note', 'revision', 'created_at', 'updated_at', 'closed_at'];
 const MODULE_KEYS = ['create', 'modify', 'delete', 'api_add', 'api_remove'];
 export function isValidChangeId(id: string): boolean {
     return /^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9-]{0,63}$/.test(id);
@@ -64,6 +65,8 @@ export function l1ValidateChange(data: unknown, id: string, where: string): {
         errors.push(diag('error', 'change/closed-at', 'closed_at 必须为 ISO 8601 或 null', { change: id }, { value: data.closed_at }, []));
     if (data.note !== undefined && typeof data.note !== 'string')
         errors.push(diag('error', 'change/note', 'note 必须为字符串', { change: id }, {}, []));
+    if (data.schedule !== undefined)
+        errors.push(...l1ValidateSchedule(data.schedule, id));
     if (!Array.isArray(data.acceptance) || data.acceptance.length === 0 || (data.acceptance as unknown[]).some(s => typeof s !== 'string' || s.trim() === '')) {
         // 0.5.4：把"哪一条、错成什么样"讲清楚（A/B 实测中把 {zh,en} 写进 acceptance 只得到一句笼统报错）
         let message = 'acceptance 必须是**纯字符串数组**（验收清单）';
@@ -136,6 +139,7 @@ export function l1ValidateChange(data: unknown, id: string, where: string): {
         intent: data.intent as LocalizedText,
         modules: modules as ChangeModules,
         acceptance: data.acceptance as string[],
+        ...(data.schedule !== undefined ? { schedule: data.schedule as ChangeSchedule } : {}),
         ...(typeof data.note === 'string' ? { note: data.note } : {}),
         revision: { before: rev.before ?? null, after: rev.after ?? null },
         created_at: String(data.created_at),
@@ -150,12 +154,15 @@ export function l1ValidateChange(data: unknown, id: string, where: string): {
     }
     return errors.length > 0 ? { change: null, errors, warnings } : { change, errors, warnings };
 }
-export async function listChangeIds(projectDir: string): Promise<string[]> {
+export async function listChangeIds(projectDir: string, strict = false): Promise<string[]> {
     try {
         const entries = await readdir(join(projectDir, CHANGES_DIR), { withFileTypes: true });
+        if (strict && entries.some(e => e.name.endsWith('.json') && e.isSymbolicLink()))
+            throw new Error('changes/ 不支持符号链接任务文件');
         return entries.filter(e => e.isFile() && e.name.endsWith('.json')).map(e => e.name.slice(0, -5)).sort();
     }
-    catch {
+    catch (error) {
+        if (strict && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
         return [];
     }
 }
@@ -196,7 +203,12 @@ export async function validateChanges(projectDir: string, byId: Map<string, Modu
     const errors: Diagnostic[] = [];
     const warnings: Diagnostic[] = [];
     const changes: ChangeData[] = [];
-    const ids = await listChangeIds(projectDir);
+    let ids: string[];
+    try { ids = await listChangeIds(projectDir, true); }
+    catch (error) {
+        errors.push(diag('error', 'change/directory-read', '不能列出变更文件', {}, { reason: String(error) }, ['检查目录与权限']));
+        return { changes, errors, warnings };
+    }
     let inProgress = 0;
     for (const id of ids) {
         const { change, error } = await loadChangeFile(projectDir, id);
@@ -227,7 +239,10 @@ export async function validateChanges(projectDir: string, byId: Map<string, Modu
             }
         }
     }
-    if (inProgress > 1)
+    const schedule = buildSchedule(changes, byId);
+    errors.push(...schedule.errors);
+    warnings.push(...schedule.warnings);
+    if (inProgress > 1 && changes.some(c => c.status === 'in_progress' && c.schedule === undefined))
         warnings.push(diag('warning', 'change/multiple-in-progress', '同时存在多个 in_progress 变更', {}, { count: inProgress }, ['建议同一时间只推进一个变更，避免结构数据互相覆盖']));
     return { changes, errors, warnings };
 }

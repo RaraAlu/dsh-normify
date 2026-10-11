@@ -5,6 +5,7 @@ import { sha256Text } from './store.js';
 import type { Api, Dep, Diagnostic, LayoutData, LocalizedText, ModuleState, SourceRef } from './types.js';
 import { validateProject, type ValidateOptions, type ValidateOutput } from './validate.js';
 import { diag } from './diag.js';
+import { buildSchedule, renderScheduleMarkdown } from './schedule.js';
 export interface BuildOptions extends ValidateOptions {
 }
 export interface BuildOutput {
@@ -117,6 +118,13 @@ export async function buildProject(projectDir: string, opts: BuildOptions): Prom
     const slug = projectDir.split(/[\\\/]/).pop() ?? 'project';
     const files = [...v.files].sort((a, b) => a.module.id.localeCompare(b.module.id));
     const byId = new Map(files.map(f => [f.module.id, f.module]));
+    const schedule = v.changes.some(change => change.schedule !== undefined)
+        ? buildSchedule(v.changes, new Map(v.files.map(file => [file.module.id, file])))
+        : null;
+    if (schedule !== null && !schedule.ok) {
+        return { ok: false, receipt: null, errors: schedule.errors,
+            warnings: [...v.warnings, ...schedule.warnings], validate: v };
+    }
     const roots = files.filter(f => f.module.parent === null).sort((a, b) => a.module.id.localeCompare(b.module.id));
     const descendantMemo = new Map<string, number>();
     const countDesc = (id: string): number => {
@@ -267,6 +275,17 @@ export async function buildProject(projectDir: string, opts: BuildOptions): Prom
             'outline.md': { sha256: sha256Text(outline), bytes: Buffer.byteLength(outline, 'utf8') },
             'api-index.json': { sha256: sha256Text(apiIndexText), bytes: Buffer.byteLength(apiIndexText, 'utf8') },
         };
+        if (schedule !== null) {
+            const scheduleArtifacts = {
+                'schedule.json': JSON.stringify(schedule, null, 2) + '\n',
+                'schedule.md': renderScheduleMarkdown(schedule),
+                'schedule.mmd': schedule.mermaid.endsWith('\n') ? schedule.mermaid : schedule.mermaid + '\n',
+            };
+            for (const [name, text] of Object.entries(scheduleArtifacts)) {
+                await writeFile(join(projectDir, name), text, 'utf8');
+                artifacts[name] = { sha256: sha256Text(text), bytes: Buffer.byteLength(text, 'utf8') };
+            }
+        }
         const receipt = {
             schema_version: 1,
             ok: true,

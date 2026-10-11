@@ -1,5 +1,7 @@
-import { mkdir, readFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { mkdir, readFile, realpath } from 'node:fs/promises';
+import { basename, dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import lockfile from 'proper-lockfile';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -8,9 +10,33 @@ import {
   ListResourcesRequestSchema, ListToolsRequestSchema, McpError, ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { collectTools, metadata } from './catalog.mjs';
+import { locateProject } from '../lib/engine/store.js';
 
 const base = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const skillNames = ['normify-gen', 'normify-dev'];
+
+// 已有目录采用真实路径。未建目录采用真实祖先。
+// 同一项目的符号链接与跨 root 调用共用锁。
+async function canonicalLockTarget(path) {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const parent = dirname(path);
+    if (parent === path) throw error;
+    return join(await canonicalLockTarget(parent), basename(path));
+  }
+}
+
+async function sharedLockTarget(path) {
+  const canonical = await canonicalLockTarget(resolve(path));
+  const key = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+  const hash = createHash('sha256').update(key).digest('hex');
+  // 哈希锁放入临时目录。不提前创建项目或用户配置。
+  const target = join(tmpdir(), 'normify-mcp-project-locks', hash);
+  await mkdir(target, { recursive: true });
+  return target;
+}
 
 export function toolResult(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -34,15 +60,18 @@ export async function createServer(options) {
       'Structure-only requests do not authorize source edits. Never fake fingerprints or acceptance.',
   });
 
-  // 排队并跨进程加锁。
-  // 避免读写交错破坏结构数据。
+  // 每次只持有一把锁。不嵌套 root 与项目锁。
+  // 项目参数先纯定位，再锁最终项目目录。
   let queue = Promise.resolve();
-  async function serialized(operation, signal) {
+  async function serialized(operation, signal, args) {
     const run = queue.then(async () => {
       if (signal?.aborted) throw new Error('Request cancelled before execution.');
-      await mkdir(rootDir, { recursive: true });
+      const hasProject = (typeof args.dir === 'string' && args.dir.trim() !== '') ||
+        (typeof args.project === 'string' && args.project.trim() !== '');
+      const projectDir = hasProject ? locateProject(rootDir, args).dir : rootDir;
+      const lockTarget = await sharedLockTarget(projectDir);
       let compromised;
-      const release = await lockfile.lock(rootDir, {
+      const release = await lockfile.lock(lockTarget, {
         stale: 60_000, update: 10_000,
         retries: { retries: 60, factor: 1.1, minTimeout: 100, maxTimeout: 500 },
         onCompromised: error => { compromised = error; },
@@ -75,7 +104,7 @@ export async function createServer(options) {
       } });
     }
     try {
-      return toolResult(await serialized(() => tool.execute(args), extra.signal));
+      return toolResult(await serialized(() => tool.execute(args), extra.signal, args));
     } catch (error) {
       return toolResult({ ok: false, error: {
         code: error.code ?? 'adapter/internal', message: error.message,

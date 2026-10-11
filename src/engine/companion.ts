@@ -5,6 +5,7 @@ import { validateProject } from './validate.js';
 import { buildProject } from './compile.js';
 import { renderProject } from './render.js';
 import { l1ValidateChange, loadChangeFile, writeChangeFile } from './changes.js';
+import { checkScheduledChange } from './schedule.js';
 import type { ChangeData, Diagnostic } from './types.js';
 export interface CloseOptions {
     repoRoot?: string;
@@ -47,6 +48,11 @@ export async function closeChange(projectDir: string, id: string, opts: CloseOpt
         return { ok: false, phase: 'load', errors: [diag('error', 'change/closed', '变更已关闭：' + id, { change: id }, {}, [])], warnings: [] };
     if (change.status === 'abandoned')
         return { ok: false, phase: 'load', errors: [diag('error', 'change/abandoned', '变更已放弃，不能再关闭：' + id, { change: id }, {}, [])], warnings: [] };
+    // 在刷新源码前检查前置；未启动任务也不得跳过验收门禁。
+    if (change.schedule !== undefined) {
+        const errors = await checkScheduledChange(projectDir, { ...change, status: 'in_progress' });
+        if (errors.length) return { ok: false, phase: 'schedule', errors, warnings: [], change };
+    }
     const repoRoot = opts.repoRoot !== undefined && opts.repoRoot.trim() !== '' ? opts.repoRoot : undefined;
     let refresh: Record<string, unknown> | null = null;
     if (repoRoot !== undefined) {

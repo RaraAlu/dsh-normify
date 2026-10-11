@@ -8,7 +8,12 @@ export interface ProjectRef {
     dir: string;
     slug: string;
 }
-/** 解析结构数据目录：dir 显式给出，或 normify-<project> 落在 rootDir 下。create=true 时自动创建空项目目录（仅写工具使用）。 */
+/** 只计算项目位置。该函数不读取或创建目录。 */
+export declare function locateProject(rootDir: string, args: {
+    project?: string;
+    dir?: string;
+}): ProjectRef;
+/** 写工具可创建项目。定位规则沿用纯函数。 */
 export declare function resolveProject(rootDir: string, args: {
     project?: string;
     dir?: string;
@@ -16,10 +21,11 @@ export declare function resolveProject(rootDir: string, args: {
     create?: boolean;
 }): Promise<ProjectRef>;
 export declare function listProjects(rootDir: string): ProjectRef[];
-export declare function listModuleFiles(projectDir: string): Promise<string[]>;
+/** 排程采用严格读取，避免遗漏占用模块。 */
+export declare function listModuleFiles(projectDir: string, strict?: boolean): Promise<string[]>;
 /** 找模块现有文件（容器 index.md 优先，其次叶子 x.md）。 */
 export declare function findModuleFile(projectDir: string, id: string): string | null;
-export declare function loadAllModules(projectDir: string): Promise<{
+export declare function loadAllModules(projectDir: string, strict?: boolean): Promise<{
     files: ModuleFile[];
     errors: Diagnostic[];
     warnings: Diagnostic[];

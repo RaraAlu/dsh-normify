@@ -13,7 +13,7 @@ export declare function l1ValidateChange(data: unknown, id: string, where: strin
     errors: Diagnostic[];
     warnings: Diagnostic[];
 };
-export declare function listChangeIds(projectDir: string): Promise<string[]>;
+export declare function listChangeIds(projectDir: string, strict?: boolean): Promise<string[]>;
 export declare function loadChangeFile(projectDir: string, id: string): Promise<{
     change: ChangeData | null;
     error: Diagnostic | null;

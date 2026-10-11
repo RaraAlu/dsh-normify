@@ -103,6 +103,19 @@ export interface ChangeModules {
   api_remove?: ChangeApiRef[]
 }
 
+/** 显式开发排程。阶段与负责人只作标签，不推导先后或容量。 */
+export interface ChangeSchedule {
+  depends_on?: string[]
+  phase?: string
+  owner?: string
+  /** 仓库相对写入路径。目录声明覆盖全部子路径。 */
+  files?: string[]
+  /** 同名资源互斥。 */
+  resources?: string[]
+  /** 0 优先，100 最后；相同优先级按变更 ID 排序。 */
+  priority?: number
+}
+
 export interface ChangeData {
   schema_version: number
   id: string
@@ -111,6 +124,7 @@ export interface ChangeData {
   intent: LocalizedText
   modules: ChangeModules
   acceptance: string[]
+  schedule?: ChangeSchedule
   note?: string
   revision: {
     before: string | null

@@ -1,4 +1,4 @@
-export declare const HELP_TOPICS: readonly ["fields", "deps", "renders", "flow", "tools", "policy", "errors", "all"];
+export declare const HELP_TOPICS: readonly ["fields", "deps", "renders", "flow", "schedule", "tools", "policy", "errors", "all"];
 export type HelpTopic = (typeof HELP_TOPICS)[number];
 export interface ToolCatalogEntry {
     name: string;

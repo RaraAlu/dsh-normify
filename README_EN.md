@@ -57,6 +57,51 @@ Architecture-only requests do not authorize source changes. Validation does not 
 Never fabricate fingerprints or acceptance evidence. Errors block compilation; report warnings too.
 Outputs include `tree.json`, `outline.md`, `api-index.json`, `receipt.json`, and `normify.html`.
 
+## Development scheduling
+
+Scheduling uses the same 31 MCP tools.
+Architecture `deps` are not task prerequisites.
+Layout `order` remains a reading order.
+
+Add optional `schedule` data through `normify_change_open`.
+A scheduled task defaults to `proposed`.
+Only a `verified` prerequisite satisfies a dependency.
+Overlapping modules, write paths, or exclusive resources prohibit concurrent `in_progress` tasks.
+Status updates and project validation enforce these gates.
+
+Use `normify_build` for frozen exports. For the live diagram call `normify_render`:
+
+```json
+{ "project": "demo", "view": "schedule" }
+```
+
+The build freezes `schedule.json`, `schedule.md`, and `schedule.mmd` in its receipt.
+The schedule renderer returns a loopback-only interactive URL, never an HTML file.
+It reads live inputs on refresh and does not require a build. The architecture renderer keeps its file output.
+Only explicit diagram requests should open the URL. URLs expire with the MCP process; render again after restart.
+Solid arrows show explicit prerequisites; orange dashed lines show registered conflicts.
+The task table separates current readiness from predicted sequential waves.
+Waves are not calendar estimates or automatic execution.
+Unscheduled legacy changes do not receive automatic permission to run in parallel.
+The default architecture view and unscheduled data remain compatible.
+
+See the [scheduling guide](docs/scheduling.md) for fields and complete tool examples.
+
+## Read-only progress trigger
+
+`UserPromptSubmit` hooks automatically collect progress evidence on matching queries.
+The collector binds Git HEAD, dirty contents, Normify inputs and read-only CodeGraph evidence.
+It does not run product tests, initialize indexes, mutate records or open a browser.
+Missing receipts remain unverified. Architecture `verified` never proves physical acceptance.
+Review the execution chain, then install and trust its exact hash:
+
+```sh
+npm run install:progress-hook -- --trust-installed
+```
+
+The installer backs up configuration and preserves existing edit hooks.
+Reinstall after execution-chain changes. See the [reporting guide](docs/progress-reporting.md).
+
 ```sh
 npm run verify:codex
 node src/stdio.mjs --root /absolute/storage --read-only

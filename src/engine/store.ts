@@ -23,28 +23,15 @@ export interface ProjectRef {
     dir: string;
     slug: string;
 }
-/** 解析结构数据目录：dir 显式给出，或 normify-<project> 落在 rootDir 下。create=true 时自动创建空项目目录（仅写工具使用）。 */
-export async function resolveProject(rootDir: string, args: { project?: string; dir?: string }, opts: { create?: boolean } = {}): Promise<ProjectRef> {
+/** 只计算项目位置。该函数不读取或创建目录。 */
+export function locateProject(rootDir: string, args: { project?: string; dir?: string }): ProjectRef {
     const root = resolve(rootDir);
-    const ensureModules = async (p: string): Promise<void> => {
-        if (!existsSync(join(p, 'modules'))) {
-            if (opts.create) {
-                await mkdir(join(p, 'modules'), { recursive: true });
-                // 项目创建时自动安装默认架构规则（acyclic 等），让后续设计模块即受约束
-                await installDefaultPolicy(p);
-            }
-            else {
-                throw new NormifyError('project/no-modules', '目录不存在或缺少 modules/：' + p);
-            }
-        }
-    };
     if (args.dir !== undefined && args.dir.trim() !== '') {
         const p = resolve(root, args.dir);
         const base = p.split(sep).pop() ?? '';
         if (!base.startsWith(PROJECT_PREFIX)) {
             throw new NormifyError('project/dir-name', '结构数据目录名必须以 ' + PROJECT_PREFIX + ' 开头，如 normify-demo-repo（实际: ' + base + '）');
         }
-        await ensureModules(p);
         return { dir: p, slug: base.slice(PROJECT_PREFIX.length) };
     }
     if (args.project !== undefined && args.project.trim() !== '') {
@@ -55,15 +42,28 @@ export async function resolveProject(rootDir: string, args: { project?: string; 
             if (!base.startsWith(PROJECT_PREFIX)) {
                 throw new NormifyError('project/dir-name', '结构数据目录名必须以 ' + PROJECT_PREFIX + ' 开头，如 normify-demo-repo（实际: ' + base + '）');
             }
-            await ensureModules(p);
             return { dir: p, slug: base.slice(PROJECT_PREFIX.length) };
         }
         const slug = slugify(args.project);
         const p = resolve(root, PROJECT_PREFIX + slug);
-        await ensureModules(p);
         return { dir: p, slug };
     }
     throw new NormifyError('project/required', '必须提供 project（项目 slug）或 dir（结构数据目录绝对路径）');
+}
+/** 写工具可创建项目。定位规则沿用纯函数。 */
+export async function resolveProject(rootDir: string, args: { project?: string; dir?: string }, opts: { create?: boolean } = {}): Promise<ProjectRef> {
+    const project = locateProject(rootDir, args);
+    if (!existsSync(join(project.dir, 'modules'))) {
+        if (opts.create) {
+            await mkdir(join(project.dir, 'modules'), { recursive: true });
+            // 初始化默认规则。读工具不创建项目。
+            await installDefaultPolicy(project.dir);
+        }
+        else {
+            throw new NormifyError('project/no-modules', '目录不存在或缺少 modules/：' + project.dir);
+        }
+    }
+    return project;
 }
 export function listProjects(rootDir: string): ProjectRef[] {
     const root = resolve(rootDir);
@@ -79,25 +79,29 @@ export function listProjects(rootDir: string): ProjectRef[] {
         .map(n => ({ slug: n.slice(PROJECT_PREFIX.length), dir: join(root, n) }))
         .sort((a, b) => a.slug.localeCompare(b.slug));
 }
-async function walk(dir: string, base: string, out: string[]): Promise<void> {
+async function walk(dir: string, base: string, out: string[], strict: boolean): Promise<void> {
     let entries: Dirent[];
     try {
         entries = await readdir(dir, { withFileTypes: true });
     }
-    catch {
+    catch (error) {
+        if (strict) throw error;
         return;
     }
     for (const e of entries) {
         const rel = base === '' ? e.name : base + '/' + e.name;
+        if (strict && e.isSymbolicLink())
+            throw new NormifyError('input/symlink', '严格读取不支持模块符号链接：' + rel);
         if (e.isDirectory())
-            await walk(join(dir, e.name), rel, out);
+            await walk(join(dir, e.name), rel, out, strict);
         else if (e.name.endsWith('.md'))
             out.push(rel);
     }
 }
-export async function listModuleFiles(projectDir: string): Promise<string[]> {
+/** 排程采用严格读取，避免遗漏占用模块。 */
+export async function listModuleFiles(projectDir: string, strict = false): Promise<string[]> {
     const out: string[] = [];
-    await walk(join(projectDir, 'modules'), '', out);
+    await walk(join(projectDir, 'modules'), '', out, strict);
     return out.sort();
 }
 /** 找模块现有文件（容器 index.md 优先，其次叶子 x.md）。 */
@@ -112,11 +116,11 @@ export function findModuleFile(projectDir: string, id: string): string | null {
         return leaf;
     return null;
 }
-export async function loadAllModules(projectDir: string): Promise<{ files: ModuleFile[]; errors: Diagnostic[]; warnings: Diagnostic[] }> {
+export async function loadAllModules(projectDir: string, strict = false): Promise<{ files: ModuleFile[]; errors: Diagnostic[]; warnings: Diagnostic[] }> {
     const errors: Diagnostic[] = [];
     const warnings: Diagnostic[] = [];
     const files: ModuleFile[] = [];
-    for (const rel of await listModuleFiles(projectDir)) {
+    for (const rel of await listModuleFiles(projectDir, strict)) {
         const abs = join(projectDir, 'modules', rel.replace(/\//g, sep));
         let text: string;
         try {

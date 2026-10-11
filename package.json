@@ -17,6 +17,8 @@
     "vendor",
     "README.md",
     "README_EN.md",
+    "docs/scheduling.md",
+    "docs/progress-reporting.md",
     "LICENSE"
   ],
   "license": "MIT",
@@ -62,6 +64,8 @@
     "setup": "node scripts/setup.mjs",
     "install:codex": "node scripts/install-codex.mjs",
     "verify:codex": "node scripts/verify-codex.mjs",
-    "install:hooks": "node scripts/install-hooks.mjs"
+    "install:hooks": "node scripts/install-hooks.mjs",
+    "install:progress-hook": "node scripts/install-progress-hook.mjs",
+    "report:progress": "node scripts/progress-report.mjs"
   }
 }
